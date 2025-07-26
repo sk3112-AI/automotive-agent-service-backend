@@ -443,8 +443,8 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
     You are an expert automotive sales strategist at AOE Motors. Use the lead profile below to produce:
 
     1. **Strategic Rationale** (2–3 bullets):
-       - Don’t mention internal scores.
-       - Identify the single best incentive lever (e.g. “$1,000 rebate,” “0% APR for 36 months,” or “$1,200 trade‑in bonus”) based on their interest and notes.
+       - Don’t call out “pricing,” “budget,” or any internal concerns—infer what matters most from the notes.
+       - Identify the single most compelling incentive (e.g. “$1,000 rebate,” “0% APR for 36 months,” or “$1,200 trade‑in bonus”) that will drive immediate action.
 
     2. **Subject Line**:
        - Must start with “Subject:” and be under 60 characters.
@@ -455,9 +455,9 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
        - Separate paragraphs with **one** blank line.
        - **Do not** indent paragraphs; start flush left.
        - Keep lines under **80 characters**.
-       - **Paragraph 1**: Greet by name and reference their interest in the {vehicle_name}, calling out one key feature.
-       - **Paragraph 2**: Clearly state the exact offer terms (e.g. “I’m offering you a $1,000 rebate…”).
-       - **Paragraph 3**: End with a strong, outcome‑oriented CTA (e.g. “Reply now to lock in this rebate”).
+       - **Paragraph 1**: Warm greeting by name and subtle reference to their interest in the {vehicle_name}.
+       - **Paragraph 2**: Introduce the offer terms clearly (e.g. “I’m offering you a $1,000 rebate…”), phrased as a value‑add rather than a concession.
+       - **Paragraph 3**: Close with an outcome‑oriented CTA (e.g. “Reply now to claim your rebate,” “Call me at (555) 123‑4567 to finalize this offer”).
        - After paragraph 3, add a signature block with your name on one line and “AOE Motors Sales Strategist” on the next.
 
     **Lead Profile:**
@@ -466,7 +466,7 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
     - Interested Model: {vehicle_name}
     - Sales Notes: {sales_notes or 'None'}
 
-    Respond in JSON with keys "analysis", "subject", and "body" mapping to the respective sections.
+    Respond in JSON with keys "analysis", "subject", and "body".
     """
 
     try:
@@ -482,20 +482,25 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
             temperature=0.7,
             max_tokens=200
         )
+
         raw_output = completion.choices[0].message.content.strip()
 
-        # Convert Markdown output to HTML for email sending
-        html_output = md_converter.render(raw_output)
+        # Parse the JSON that the LLM returned
+        import json
+        try:
+            parsed = json.loads(raw_output)
+            # If the LLM included “Subject:” prefix, strip it off:
+            subject_text = parsed.get("subject", "").removeprefix("Subject: ").strip()
+            body_md     = parsed.get("body", "")
+        except Exception as e:
+            logging.error(f"JSON parse error in suggest_offer_llm: {e}", exc_info=True)
+            # fall back to whole output as body
+            subject_text = "Exclusive Offer from AOE Motors"
+            body_md      = raw_output
 
-        return raw_output, html_output  # Return both markdown and html
-
-    except Exception as e:
-        logging.error(f"Error suggesting offer: {e}", exc_info=True)
-        return (
-            "Error generating offer suggestion. Please try again.",
-            "Error generating offer suggestion. Please try again."
-        )
-
+        # Now convert **only** the Markdown body to HTML
+        html_body = md_converter.render(body_md)
+        return subject_text, html_body
 
 # NEW: Function to generate call talking points for automation agent
 def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> str:
