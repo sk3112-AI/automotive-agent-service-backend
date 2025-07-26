@@ -441,34 +441,25 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple: # Return
     
     vehicle_features = vehicle_data.get("features", "excellent features")
 
-    # Define prompt instructions based on lead score
-    if lead_score_text == "Cold":
-        offer_prompt_advice = "Since the lead is Cold, advise to wait and understand interest. Absolutely DO NOT suggest any immediate offers like discounts or financing. Focus on observation."
-    else: # Hot or Warm
-        offer_prompt_advice = f"""
-        - Suggest a personalized offer type (e.g., "Complimentary Service Package", "Extended Warranty", "EV Charger for Home", "Discount (e.g., 5-10% off accessories)", "Special Financing Option").
-        - Consider the customer's current vehicle ({current_vehicle}), their expressed interest ({vehicle_name}), and any concerns in sales notes ("{sales_notes}").
-        - Mention a specific feature of {vehicle_name} ({vehicle_features}) if relevant to the offer.
-        - For pricing/cost concerns, focus on financing options or potential discounts. For safety/performance, extended warranty or roadside assistance.
-        """
+    offer_prompt = f"""
+You are an expert automotive sales strategist at AOE Motors.  Using the full lead profile below, produce:
 
-    prompt = f"""
-    You are an AI Sales Advisor for AOE Motors. Your task is to suggest the NEXT BEST OFFER TYPE for a customer based on their profile.
+1. **Analysis** (2–3 bullets) explaining which incentive lever (financing, rebate, bundle, trade‑in bonus) best aligns with this customer’s situation.
+2. **Subject line** for a highly personalized offer email.
+3. **Email body** in warm, conversational language that:
+   - Mentions their interest in the {vehicle_name} and one key feature: "{vehicle_features}"
+   - Incorporates any sales notes: "{sales_notes or 'None'}"
+   - Leverages their lead score ({lead_score_text}, {numeric_score})
+   - Includes **outcome‑oriented CTAs** such as “Click here to secure this rate,” “Reply now to lock in your bonus,” or “Tap to claim your complimentary service upgrade.”
 
-    **Customer Profile:**
-    - Name: {customer_name}
-    - Vehicle of Interest: {vehicle_name}
-    - Current Vehicle: {current_vehicle}
-    - Lead Status: {lead_score_text} ({numeric_lead_score} points)
-    - Sales Notes: "{sales_notes}"
-    - Key Features of {vehicle_name}: {vehicle_features}
+**Lead Profile:**
+- Name: {customer_name}
+- Current Vehicle: {current_vehicle}
+- Interested Model: {vehicle_name}
+- Lead Score: {lead_score_text} ({numeric_score})
+- Sales Notes: {sales_notes or 'None'}
 
-    **Instructions:**
-    - Output ONLY the recommended offer advice.
-    - Format the advice clearly using **markdown paragraphs** or **bullet points** for readability.
-    - Start with "**AI Offer Suggestion:**"
-    {offer_prompt_advice}
-    """
+Respond in JSON:
 
     try:
         completion = openai_client.chat.completions.create(
