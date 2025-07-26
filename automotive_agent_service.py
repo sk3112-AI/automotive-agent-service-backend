@@ -503,28 +503,32 @@ def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> 
     sales_notes = lead_details.get("sales_notes", "")
     vehicle_features = vehicle_data.get("features", "excellent features")
 
-    prompt = f"""
-    You are an AI Sales Advisor preparing talking points for a sales representative's call with {customer_name}.
+    offer_prompt = f"""
+You are an expert automotive sales strategist at AOE Motors. Using the lead profile below, generate a JSON object with three keys:
 
-    **Customer Profile**
-    - Name: {customer_name}
-    - Vehicle Interested: {vehicle_name}
-    - Current Vehicle: {current_vehicle}
-    - Lead Status: {lead_score_text} ({numeric_lead_score} points)
-    - Sales Notes: {sales_notes or 'None'}
-    - Key Features of {vehicle_name}: {vehicle_features}
+1. "analysis": a list of 2–3 bullets explaining
+   - Why you chose this incentive (from financing, rebate, bundle, or trade‑in bonus).
+   - How the customer's sales notes influenced your choice.
+   - Which single key feature of the {vehicle_name} you are highlighting.
 
-    **Instructions**
-    1. Start with **AI Talking Points:** as a header.
-    2. Provide concise, actionable bullet points:
-    - Acknowledge their interest in {vehicle_name}.
-    - Address any concerns from the sales notes empathetically.
-    - Highlight 2–3 top features of {vehicle_name} based on their profile.
-    - Suggest strategic questions to uncover needs.
-    - End with a clear, outcome‑oriented CTA (e.g., “Reply now to explore financing options”).
-    3. Format your output as a Markdown list.
-    4. If sales notes are empty or irrelevant, focus on re‑engagement and discovery.
-    """
+2. "subject": a benefit‑driven email subject under 60 characters.
+
+3. "body": the customer‑facing email copy only, formatted as **3 paragraphs** of **2–3 sentences** each:
+   • **Paragraph 1**: Begin with “Hi {customer_name}, ” then mention their interest in the {vehicle_name} and **highlight one key feature** from this list:  
+     {vehicle_features}  
+   • **Paragraph 2**: Clearly state the exact offer terms (e.g. “I’m offering you a $1,000 rebate on your new {vehicle_name}.”).  
+   • **Paragraph 3**: Close with a strong, outcome‑oriented CTA (e.g. “Reply now to claim your rebate,” or “Call me at (555) 123‑4567 to finalize this offer”).
+
+**Lead Profile:**
+- Name: {customer_name}
+- Current Vehicle: {current_vehicle or 'N/A'}
+- Interested Model: {vehicle_name}
+- Sales Notes: {sales_notes or 'None'}
+
+**Important**:  
+- The **body** field must include only the email content—do **not** include analysis or any JSON.  
+- Return strictly valid JSON with keys "analysis", "subject", and "body".
+"""
 
     try:
         completion = openai_client.chat.completions.create(
