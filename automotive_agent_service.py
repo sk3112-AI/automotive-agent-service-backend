@@ -364,7 +364,8 @@ def generate_followup_email_llm(customer_name, customer_email, vehicle_name, sal
     """
 
     try:
-        logging.info("Drafting follow‑up email with AI...") # This spinner is agent service
+            # 👉 indent‐fix applied on 2025‑07‑26
+            logging.info("Drafting follow‑up email with AI...") # This spinner is agent service
             raw_output = openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
