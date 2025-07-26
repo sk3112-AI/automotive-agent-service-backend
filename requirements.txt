@@ -4,6 +4,4 @@ pandas
 openai
 supabase
 python-dotenv
-# For timezone support:
-tzdata # if you use ZoneInfo('Asia/Kolkata') on Linux/Docker
-# pytz # if you prefer pytz for timezones
+# tzdata # No longer explicitly needed here if installed via apt-get in Dockerfile, but harmless if left.
