@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pandas
+openai
+supabase
+python-dotenv
+# For timezone support:
+tzdata # if you use ZoneInfo('Asia/Kolkata') on Linux/Docker
+# pytz # if you prefer pytz for timezones
