@@ -375,7 +375,7 @@ def generate_followup_email_llm(customer_name, customer_email, vehicle_name, sal
                 temperature=0.0,
                 max_tokens=800
             )
-            draft = completion.choices[0].message.content.strip()
+            draft = raw_output.choices[0].message.content.strip()
             if "Subject:" in draft:
                 parts = draft.split("Subject:", 1)
                 subject_line = parts[1].split("\n", 1)[0].strip()
