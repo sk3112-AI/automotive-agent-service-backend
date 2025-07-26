@@ -494,29 +494,27 @@ def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> 
     vehicle_features = vehicle_data.get("features", "excellent features")
 
     prompt = f"""
-    You are an AI Sales Advisor preparing talking points for a sales representative's call with {customer_name}.
+You are an AI Sales Advisor preparing talking points for a sales representative's call with {customer_name}.
 
-    **Customer Profile:**
-    - Name: {customer_name}
-    - Vehicle Interested: {vehicle_name}
-    - Current Vehicle: {current_vehicle}
-    - Lead Status: {lead_score_text} ({numeric_lead_score} points)
-    - Sales Notes: "{sales_notes}"
-    - Key Features of {vehicle_name}: {vehicle_features}
+**Customer Profile**
+- Name: {customer_name}
+- Vehicle Interested: {vehicle_name}
+- Current Vehicle: {current_vehicle}
+- Lead Status: {lead_score_text} ({numeric_lead_score} points)
+- Sales Notes: {sales_notes or 'None'}
+- Key Features of {vehicle_name}: {vehicle_features}
 
-    **Instructions:**
-    - Provide concise, actionable bullet points for the sales call.
-    - Start with "**AI Talking Points:**"
-    - Include points to:
-        - Acknowledge their interest in {vehicle_name}.
-        - Address any specific concerns from "Sales Notes" directly and empathetically.
-        - Highlight 2-3 most relevant features of {vehicle_name} based on profile (e.g., if coming from a different brand, highlight competitive advantages).
-        - Suggest questions to ask to understand their needs better.
-        - Provide a clear call to action for the call (e.g., schedule next step, clarify doubts).
-    - Format output as a markdown list.
-    - If sales notes are empty or irrelevant, focus on general re-engagement or discovery.
-    """
-
+**Instructions**
+1. Start with **AI Talking Points:** as a header.
+2. Provide concise, actionable bullet points:
+   - Acknowledge their interest in {vehicle_name}.
+   - Address any concerns from the sales notes empathetically.
+   - Highlight 2–3 top features of {vehicle_name} based on their profile.
+   - Suggest strategic questions to uncover needs.
+   - End with a clear, outcome‑oriented CTA (e.g., “Reply now to explore financing options”).
+3. Format your output as a Markdown list.
+4. If sales notes are empty or irrelevant, focus on re‑engagement and discovery.
+"""
     try:
         completion = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
