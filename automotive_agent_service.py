@@ -467,7 +467,7 @@ Respond in JSON with keys "analysis", "subject", and "body" mapping to the respe
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a highly analytical AI Sales Advisor. Provide concise, actionable offer suggestions."},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": offer_prompt}
             ],
             temperature=0.7,
             max_tokens=200
