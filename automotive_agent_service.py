@@ -470,20 +470,22 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
         )
         raw_output = completion.choices[0].message.content.strip()
 
-        # Parse the JSON that the LLM returned
+        # parse the JSON payload
         import json
         try:
-            parsed      = json.loads(raw_output)
-            subject_txt = parsed.get("subject", "").removeprefix("Subject: ").strip()
-            body_md     = parsed.get("body", "")
-        except Exception as e:
-            logging.error(f"JSON parse error in suggest_offer_llm: {e}", exc_info=True)
-            subject_txt = "Exclusive Offer from AOE Motors"
+            parsed = json.loads(raw_output)
+            subject_text = parsed["subject"].removeprefix("Subject: ").strip()
+            body_md     = parsed["body"]
+        except Exception:
+            # fallback if JSON was malformed
+            subject_text = "Exclusive Offer from AOE Motors"
             body_md     = raw_output
 
-        # Convert only the Markdown body to HTML
+        # convert only the Markdown body to HTML
         html_body = md_converter.render(body_md)
-        return subject_txt, html_body
+
+        # return just what we need to email
+        return subject_text, html_body
 
     except Exception as e:
         logging.error(f"Error suggesting offer: {e}", exc_info=True)
@@ -812,15 +814,14 @@ async def trigger_batch_offer_agent_endpoint(request_data: BatchTriggerRequest):
                 continue
 
             # 3. Generate offer content using LLM
-            offer_text_markdown, offer_text_html = suggest_offer_llm(lead_data, vehicle_details) # Reusing suggest_offer_llm
+            offer_subject, offer_text_html = suggest_offer_llm(lead_data, vehicle_details) # Reusing suggest_offer_llm
             
             if not offer_text_html:
                 logging.error(f"Failed to generate offer content for {lead_id}. Skipping.")
                 failed_count += 1
                 continue
 
-            offer_subject = f"Exclusive Offer for You: Your New {lead_data['vehicle']}!" # Subject line for offer email
-
+            
             # 4. Send offer email via SMTP
             email_sent = send_email_via_smtp(
                 lead_data['email'], offer_subject, offer_text_html,
