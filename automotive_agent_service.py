@@ -490,10 +490,9 @@ def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> 
     lead_score_text = lead_details.get("lead_score_text", "New")
     numeric_lead_score = lead_details.get("numeric_lead_score", 0)
     sales_notes = lead_details.get("sales_notes", "")
-
     vehicle_features = vehicle_data.get("features", "excellent features")
 
-    prompt = f"""
+        prompt = f"""
     You are an AI Sales Advisor preparing talking points for a sales representative's call with {customer_name}.
 
     **Customer Profile**
