@@ -441,22 +441,31 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple: # Return
     
     vehicle_features = vehicle_data.get("features", "excellent features")
 
-    offer_prompt = f"""
-You are an expert automotive sales strategist at AOE Motors. Using the full lead profile below, produce:
+offer_prompt = f"""
+You are an expert automotive sales strategist at AOE Motors. Use the lead profile below to produce:
 
-1. **Analysis** (2–3 bullets) explaining which incentive lever (financing, rebate, bundle, trade-in bonus) best aligns with this customer’s situation.
-2. **Subject line** for a highly personalized offer email.
-3. **Email body** in warm, conversational language that:
-   - Mentions their interest in the {vehicle_name} and one key feature: "{vehicle_features}"
-   - Incorporates any sales notes: "{sales_notes or 'None'}"
-   - Leverages their lead score ({lead_score_text}, {numeric_lead_score})
-   - Includes **outcome-oriented CTAs** such as “Click here to secure this rate,” “Reply now to lock in your bonus,” or “Tap to claim your complimentary service upgrade.”
+1. **Strategic Rationale** (2–3 bullets):
+   - Don’t mention internal scores.
+   - Identify the single best incentive lever (e.g. “$1,000 rebate,” “0% APR for 36 months,” or “$1,200 trade‑in bonus”) based on their interest and notes.
+
+2. **Subject Line**:
+   - Must start with “Subject:” and be under 60 characters.
+   - Place the subject on its own line, followed by one blank line.
+
+3. **Email Body** (plain text only):
+   - After the blank line following the subject, write exactly **3 paragraphs**, each **2–3 sentences** long.
+   - Separate paragraphs with **one** blank line.
+   - **Do not** indent paragraphs; start flush left.
+   - Keep lines under **80 characters**.
+   - **Paragraph 1**: Greet by name and reference their interest in the {vehicle_name}, calling out one key feature.
+   - **Paragraph 2**: Clearly state the exact offer terms (e.g. “I’m offering you a $1,000 rebate…”).
+   - **Paragraph 3**: End with a strong, outcome‑oriented CTA (e.g. “Reply now to lock in this rebate”).
+   - After paragraph 3, add a signature block with your name on one line and “AOE Motors Sales Strategist” on the next.
 
 **Lead Profile:**
 - Name: {customer_name}
-- Current Vehicle: {current_vehicle}
+- Current Vehicle: {current_vehicle or 'N/A'}
 - Interested Model: {vehicle_name}
-- Lead Score: {lead_score_text} ({numeric_lead_score})
 - Sales Notes: {sales_notes or 'None'}
 
 Respond in JSON with keys "analysis", "subject", and "body" mapping to the respective sections.
