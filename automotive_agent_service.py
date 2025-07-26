@@ -30,6 +30,40 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s -
 
 app = FastAPI()
 
+# ─── GLOBAL VEHICLE DATA ────────────────────────────────────────────
+# Used by both follow‑up and offer agents to look up AOE model specs
+AOE_VEHICLE_DATA = {
+    "AOE Apex": {
+        "type": "Luxury Sedan",
+        "powertrain": "Gasoline",
+        "features": (
+            "Premium leather interior, Advanced driver‑assistance systems (ADAS), "
+            "Panoramic sunroof, Bose premium sound system, Adaptive cruise control, "
+            "Lane‑keeping assist, Automated parking, Heated and ventilated seats."
+        )
+    },
+    "AOE Volt": {
+        "type": "Electric Compact",
+        "powertrain": "Electric",
+        "features": (
+            "Long‑range battery (500 miles), Fast charging (80% in 20 min), "
+            "Regenerative braking, Solar roof charging, Vehicle‑to‑Grid (V2G) capability, "
+            "Digital cockpit, Over‑the‑air updates, Extensive charging network access."
+        )
+    },
+    "AOE Thunder": {
+        "type": "Performance SUV",
+        "powertrain": "Gasoline",
+        "features": (
+            "V8 Twin‑Turbo Engine, Adjustable air suspension, Sport Chrono Package, "
+            "High‑performance braking system, Off‑road capabilities, Torque vectoring, "
+            "360‑degree camera, Ambient lighting, Customizable drive modes."
+        )
+    }
+}
+# ─────────────────────────────────────────────────────────────────────
+
+
 # --- GLOBAL CONFIGURATIONS FOR ANALYTICS AND AUTOMATION SERVICE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
