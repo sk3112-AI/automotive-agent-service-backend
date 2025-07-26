@@ -14,6 +14,8 @@ import smtplib # Using smtplib for this service's emails as requested
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+from markdown_it import MarkdownIt
+md_converter = MarkdownIt()
 
 # For IST timezone conversion for analytics
 try:
