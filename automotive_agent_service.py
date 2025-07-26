@@ -454,38 +454,36 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
 
     **Important**: The **body** field must contain only the email content—do **not** include any analysis or rationale.
     """
-
     try:
+        # 1) Call the LLM
         completion = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a highly analytical AI Sales Advisor. Provide concise, actionable offer suggestions."
-                },
-                {"role": "user", "content": offer_prompt}
+                {"role": "system", "content": "You are a highly analytical AI Sales Advisor. Provide concise, actionable offer suggestions."},
+                {"role": "user",   "content": offer_prompt}
             ],
             temperature=0.7,
             max_tokens=300
         )
         raw_output = completion.choices[0].message.content.strip()
 
-        # parse the JSON payload
+        # 2) Parse JSON exactly like your follow‑up agent does
         import json
         try:
-            parsed = json.loads(raw_output)
-            subject_text = parsed["subject"].removeprefix("Subject: ").strip()
-            body_md     = parsed["body"]
-        except Exception:
-            # fallback if JSON was malformed
-            subject_text = "Exclusive Offer from AOE Motors"
+            parsed      = json.loads(raw_output)
+            subject_txt = parsed.get("subject", "").removeprefix("Subject: ").strip()
+            body_md     = parsed.get("body", "")
+        except Exception as e:
+            logging.error(f"JSON parse error in suggest_offer_llm: {e}", exc_info=True)
+            # Fallback to raw output
+            subject_txt = f"Exclusive Offer from AOE Motors"
             body_md     = raw_output
 
-        # convert only the Markdown body to HTML
+        # 3) Convert only the Markdown body to HTML
         html_body = md_converter.render(body_md)
 
-        # return just what we need to email
-        return subject_text, html_body
+        # 4) Return exactly (subject, html_body) so your SMTP call uses the same pattern
+        return subject_txt, html_body
 
     except Exception as e:
         logging.error(f"Error suggesting offer: {e}", exc_info=True)
@@ -494,6 +492,7 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
             "Error generating offer suggestion. Please try again."
         )
 
+    
 # NEW: Function to generate call talking points for automation agent
 def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> str:
     customer_name = lead_details.get("customer_name", "customer")
