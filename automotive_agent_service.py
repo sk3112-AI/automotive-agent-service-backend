@@ -429,67 +429,72 @@ def generate_welcome_email_html(customer_name, vehicle_name): # Renamed for clar
 """
     return subject, body
 
-
 # NEW: Function to suggest offer for automation agent
-def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple: # Returns (text_output, html_output)
+def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Returns (text_output, html_output)
     customer_name = lead_details.get("customer_name", "customer")
-    vehicle_name = lead_details.get("vehicle_name", "vehicle")
+    vehicle_name = lead_details.get("vehicle_interested", "vehicle")
     current_vehicle = lead_details.get("current_vehicle", "N/A")
     lead_score_text = lead_details.get("lead_score_text", "New")
     numeric_lead_score = lead_details.get("numeric_lead_score", 0)
     sales_notes = lead_details.get("sales_notes", "")
-    
     vehicle_features = vehicle_data.get("features", "excellent features")
 
-offer_prompt = f"""
-You are an expert automotive sales strategist at AOE Motors. Use the lead profile below to produce:
+    offer_prompt = f"""
+    You are an expert automotive sales strategist at AOE Motors. Use the lead profile below to produce:
 
-1. **Strategic Rationale** (2–3 bullets):
-   - Don’t mention internal scores.
-   - Identify the single best incentive lever (e.g. “$1,000 rebate,” “0% APR for 36 months,” or “$1,200 trade‑in bonus”) based on their interest and notes.
+    1. **Strategic Rationale** (2–3 bullets):
+       - Don’t mention internal scores.
+       - Identify the single best incentive lever (e.g. “$1,000 rebate,” “0% APR for 36 months,” or “$1,200 trade‑in bonus”) based on their interest and notes.
 
-2. **Subject Line**:
-   - Must start with “Subject:” and be under 60 characters.
-   - Place the subject on its own line, followed by one blank line.
+    2. **Subject Line**:
+       - Must start with “Subject:” and be under 60 characters.
+       - Place the subject on its own line, followed by one blank line.
 
-3. **Email Body** (plain text only):
-   - After the blank line following the subject, write exactly **3 paragraphs**, each **2–3 sentences** long.
-   - Separate paragraphs with **one** blank line.
-   - **Do not** indent paragraphs; start flush left.
-   - Keep lines under **80 characters**.
-   - **Paragraph 1**: Greet by name and reference their interest in the {vehicle_name}, calling out one key feature.
-   - **Paragraph 2**: Clearly state the exact offer terms (e.g. “I’m offering you a $1,000 rebate…”).
-   - **Paragraph 3**: End with a strong, outcome‑oriented CTA (e.g. “Reply now to lock in this rebate”).
-   - After paragraph 3, add a signature block with your name on one line and “AOE Motors Sales Strategist” on the next.
+    3. **Email Body** (plain text only):
+       - After the blank line following the subject, write exactly **3 paragraphs**, each **2–3 sentences** long.
+       - Separate paragraphs with **one** blank line.
+       - **Do not** indent paragraphs; start flush left.
+       - Keep lines under **80 characters**.
+       - **Paragraph 1**: Greet by name and reference their interest in the {vehicle_name}, calling out one key feature.
+       - **Paragraph 2**: Clearly state the exact offer terms (e.g. “I’m offering you a $1,000 rebate…”).
+       - **Paragraph 3**: End with a strong, outcome‑oriented CTA (e.g. “Reply now to lock in this rebate”).
+       - After paragraph 3, add a signature block with your name on one line and “AOE Motors Sales Strategist” on the next.
 
-**Lead Profile:**
-- Name: {customer_name}
-- Current Vehicle: {current_vehicle or 'N/A'}
-- Interested Model: {vehicle_name}
-- Sales Notes: {sales_notes or 'None'}
+    **Lead Profile:**
+    - Name: {customer_name}
+    - Current Vehicle: {current_vehicle or 'N/A'}
+    - Interested Model: {vehicle_name}
+    - Sales Notes: {sales_notes or 'None'}
 
-Respond in JSON with keys "analysis", "subject", and "body" mapping to the respective sections.
-"""
+    Respond in JSON with keys "analysis", "subject", and "body" mapping to the respective sections.
+    """
 
     try:
         completion = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a highly analytical AI Sales Advisor. Provide concise, actionable offer suggestions."},
+                {
+                    "role": "system",
+                    "content": "You are a highly analytical AI Sales Advisor. Provide concise, actionable offer suggestions."
+                },
                 {"role": "user", "content": offer_prompt}
             ],
             temperature=0.7,
             max_tokens=200
         )
         raw_output = completion.choices[0].message.content.strip()
-        
+
         # Convert Markdown output to HTML for email sending
         html_output = md_converter.render(raw_output)
 
-        return raw_output, html_output # Return both markdown and html
+        return raw_output, html_output  # Return both markdown and html
+
     except Exception as e:
         logging.error(f"Error suggesting offer: {e}", exc_info=True)
-        return "Error generating offer suggestion. Please try again.", "Error generating offer suggestion. Please try again."
+        return (
+            "Error generating offer suggestion. Please try again.",
+            "Error generating offer suggestion. Please try again."
+        )
 
 
 # NEW: Function to generate call talking points for automation agent
