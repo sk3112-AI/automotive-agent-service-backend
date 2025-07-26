@@ -364,8 +364,8 @@ def generate_followup_email_llm(customer_name, customer_email, vehicle_name, sal
     """
 
     try:
-        with st.spinner("Drafting email with AI..."): # This spinner is for dashboard UI, not agent service
-            completion = openai_client.chat.completions.create(
+        logging.info("Drafting follow‑up email with AI..."): # This spinner is agent service
+            raw_output = openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "You are a helpful and persuasive sales assistant for AOE Motors."},
