@@ -442,24 +442,25 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple: # Return
     vehicle_features = vehicle_data.get("features", "excellent features")
 
     offer_prompt = f"""
-You are an expert automotive sales strategist at AOE Motors.  Using the full lead profile below, produce:
+You are an expert automotive sales strategist at AOE Motors. Using the full lead profile below, produce:
 
-1. **Analysis** (2–3 bullets) explaining which incentive lever (financing, rebate, bundle, trade‑in bonus) best aligns with this customer’s situation.
+1. **Analysis** (2–3 bullets) explaining which incentive lever (financing, rebate, bundle, trade-in bonus) best aligns with this customer’s situation.
 2. **Subject line** for a highly personalized offer email.
 3. **Email body** in warm, conversational language that:
    - Mentions their interest in the {vehicle_name} and one key feature: "{vehicle_features}"
    - Incorporates any sales notes: "{sales_notes or 'None'}"
-   - Leverages their lead score ({lead_score_text}, {numeric_score})
-   - Includes **outcome‑oriented CTAs** such as “Click here to secure this rate,” “Reply now to lock in your bonus,” or “Tap to claim your complimentary service upgrade.”
+   - Leverages their lead score ({lead_score_text}, {numeric_lead_score})
+   - Includes **outcome-oriented CTAs** such as “Click here to secure this rate,” “Reply now to lock in your bonus,” or “Tap to claim your complimentary service upgrade.”
 
 **Lead Profile:**
 - Name: {customer_name}
 - Current Vehicle: {current_vehicle}
 - Interested Model: {vehicle_name}
-- Lead Score: {lead_score_text} ({numeric_score})
+- Lead Score: {lead_score_text} ({numeric_lead_score})
 - Sales Notes: {sales_notes or 'None'}
 
-Respond in JSON:
+Respond in JSON with keys "analysis", "subject", and "body" mapping to the respective sections.
+"""
 
     try:
         completion = openai_client.chat.completions.create(
@@ -492,7 +493,7 @@ def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> 
     sales_notes = lead_details.get("sales_notes", "")
     vehicle_features = vehicle_data.get("features", "excellent features")
 
-        prompt = f"""
+    prompt = f"""
     You are an AI Sales Advisor preparing talking points for a sales representative's call with {customer_name}.
 
     **Customer Profile**
