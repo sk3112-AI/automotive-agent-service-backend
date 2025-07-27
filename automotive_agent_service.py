@@ -478,8 +478,8 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
     **Important**: The **body** field must contain only the email content—do **not** include any analysis or rationale.
     """
     try:
-    # 1) Call the LLM via function‐calling
-    response = openai_client.chat.completions.create(
+        # 1) Call the LLM via function‐calling
+        response = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
             {"role":"system","content":"You are an expert automotive sales strategist at AOE Motors."},
@@ -488,19 +488,19 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
         functions=[create_offer_fn],
         function_call={"name":"create_offer"},
         temperature=0.7,
-    )
+        )
 
-    # 2) Parse the guaranteed JSON from the function call
-    msg = response.choices[0].message
-    payload = json.loads(msg.function_call.arguments)
-    subject_txt = payload["subject"].removeprefix("Subject: ").strip()
-    body_md     = payload["body"]
+        # 2) Parse the guaranteed JSON from the function call
+        msg = response.choices[0].message
+        payload = json.loads(msg.function_call.arguments)
+        subject_txt = payload["subject"].removeprefix("Subject: ").strip()
+        body_md     = payload["body"]
 
-    # 3) Convert only the Markdown body to HTML
-    html_body = md_converter.render(body_md)
+        # 3) Convert only the Markdown body to HTML
+        html_body = md_converter.render(body_md)
 
-    # 4) Return exactly what your SMTP caller expects
-    return subject_txt, html_body
+        # 4) Return exactly what your SMTP caller expects
+        return subject_txt, html_body
 
     except Exception as e:
         logging.error(f"Error suggesting offer: {e}", exc_info=True)
@@ -508,8 +508,8 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
             "Error generating offer suggestion. Please try again.",
             "Error generating offer suggestion. Please try again."
         )
+        # fixed inendation
 
-    
 # NEW: Function to generate call talking points for automation agent
 def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> str:
     customer_name = lead_details.get("customer_name", "customer")
