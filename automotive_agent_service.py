@@ -424,34 +424,6 @@ def generate_followup_email_llm(customer_name, customer_email, vehicle_name, sal
         logging.error(f"Error drafting email with AI: {e}", exc_info=True)
         return None, None, None
 
-# MODIFIED: generate_lost_email to use HTML <p> tags
-def generate_lost_email_html(customer_name, vehicle_name): # Renamed for clarity that it outputs HTML
-    subject = f"We Miss You, {customer_name}!"
-    body = f"""<p>Dear {customer_name},</p>
-<p>We noticed you haven't moved forward with your interest in the {vehicle_name}. We understand circumstances change, but we'd love to hear from you if you have any feedback or if there's anything we can do to help.</p>
-<p>Sincerely,</p>
-<p>AOE Motors Team</p>
-"""
-    return subject, body
-
-# MODIFIED: generate_welcome_email to use HTML <p> tags
-def generate_welcome_email_html(customer_name, vehicle_name): # Renamed for clarity that it outputs HTML
-    subject = f"Welcome to the AOE Family, {customer_name}!"
-    body = f"""<p>Dear {customer_name},</p>
-<p>Welcome to the AOE Motors family! We're thrilled you chose the {vehicle_name}.</p>
-<p>To help you get started, here are some important next steps and documents:</p>
-<ul>
-    <li><b>Next Steps:</b> Our sales representative will be in touch shortly to finalize your delivery details and walk you through your new vehicle's features.</li>
-    <li><b>Important Documents:</b> You'll find your purchase agreement, warranty information, and a quick-start guide for your {vehicle_name} attached to this email (or accessible via the link below).</li>
-</ul>
-<p>[Link to Digital Documents/Owner's Manual - e.g., www.aoemotors.com/your-vehicle-docs]</p>
-<p>Should you have any questions before then, please don't hesitate to reach out to your sales representative or our customer support team at support@aoemotors.com.</p>
-<p>We're excited for you to experience the AOE difference!</p>
-<p>Sincerely,</p>
-<p>The AOE Motors Team</p>
-"""
-    return subject, body
-
 # NEW: Function to suggest offer for automation agent
 def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Returns (text_output, html_output)
     customer_name      = lead_details.get("customer_name", "customer")
@@ -570,21 +542,32 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
 - Interested Model: {vehicle_name}
 - Sales Notes: {sales_notes or 'None'}
 """
-
     try:
-        completion = openai_client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an AI Sales Advisor that provides clear, actionable talking points for sales calls."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "You are a highly analytical AI Sales Advisor."},
+                {"role": "user",   "content": offer_prompt}
             ],
+            functions=[create_offer_fn],
+            function_call={"name": "create_offer"},
             temperature=0.7,
             max_tokens=300
         )
-        return completion.choices[0].message.content.strip()
+        msg = response.choices[0].message
+        import json
+        payload     = json.loads(msg.function_call.arguments)
+        subject_txt = payload["subject"].removeprefix("Subject: ").strip()
+        body_md     = payload["body"]
+        html_body   = md_converter.render(body_md)
+        return subject_txt, html_body
+
     except Exception as e:
-        logging.error(f"Error generating talking points: {e}", exc_info=True)
-        return "Error generating talking points. Please try again."
+        logging.error(f"Error in suggest_offer_llm: {e}", exc_info=True)
+        return (
+            "Error generating offer suggestion. Please try again.",
+            "Error generating offer suggestion. Please try again."
+        )
 
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
