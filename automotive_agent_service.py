@@ -779,8 +779,10 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
                 continue
 
             # 3) Analyze sentiment for use in the follow‑up email
-                               notes_sentiment = analyze_sentiment_llm(sales_notes)
-                               logging.info(f"Sales notes sentiment for lead {lead_id}: {notes_sentiment}")
+            notes_sentiment = analyze_sentiment_llm(sales_notes)
+            logging.info(f"Sales notes sentiment for lead {lead_id}: {notes_sentiment}")
+
+            # fixed inendation
 
             # 4. Generate email content using LLM (reusing dashboard logic)
             subject, body_markdown, body_html = generate_followup_email_llm(
