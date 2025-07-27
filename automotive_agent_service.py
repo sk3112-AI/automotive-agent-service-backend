@@ -756,20 +756,19 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
             lead_data = response.data
 
             # 2. Re‑evaluate sales notes relevance/sentiment (similar to dashboard logic)
-                              sales_notes = lead_data.get('sales_notes', '')
+            sales_notes = lead_data.get('sales_notes', '')
 
-                              # Only proceed if there are notes to evaluate
-                              if sales_notes.strip():
-                              # Call the relevance checker
-                                  notes_relevance = check_notes_relevance_llm(sales_notes)
-                                  logging.info(f"Sales notes relevance for {lead_data['request_id']}: {notes_relevance}")
+            # Only proceed if there are notes to evaluate
+            if sales_notes.strip():
+            # Call the relevance checker
+                notes_relevance = check_notes_relevance_llm(sales_notes)
+                logging.info(f"Sales notes relevance for {lead_data['request_id']}: {notes_relevance}")
 
-                             # Skip if explicitly irrelevant
-                             if notes_relevance != "RELEVANT":
-                                 logging.info(
-                                 f"Skipping follow‑up for {lead_data['request_id']} due to irrelevant notes."
-                                   )
-                                  continue
+            # Skip if explicitly irrelevant
+            if notes_relevance != "RELEVANT":
+                logging.info(f"Skipping follow‑up for {lead_data['request_id']} due to irrelevant notes.")
+                continue
+            # fixed inendation  
 
             # 3. Get vehicle details (hardcoded locally or fetched)
             vehicle_details = AOE_VEHICLE_DATA.get(lead_data['vehicle'], {})
