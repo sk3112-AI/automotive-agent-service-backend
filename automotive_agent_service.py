@@ -98,6 +98,29 @@ if not OPENAI_API_KEY:
     raise ValueError("OpenAI API Key not found. Please set OPENAI_API_KEY.")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+create_offer_fn = {
+    "name": "create_offer",
+    "description": "Generate a personalized offer email based on the lead profile.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "analysis": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "2–3 internal bullet points explaining the strategy."
+            },
+            "subject": {
+                "type": "string",
+                "description": "Email subject line (≤60 chars)."
+            },
+            "body": {
+                "type": "string",
+                "description": "Customer‑facing email body: 3 paragraphs of 2–3 sentences."
+            }
+        },
+        "required": ["analysis", "subject", "body"]
+    }
+}
 
 # --- Helper Function for Email Sending (using smtplib as requested for this service) ---
 def send_email_via_smtp(recipient_email, subject, body, request_id=None, event_type="email_sent_agent"):
@@ -455,35 +478,29 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
     **Important**: The **body** field must contain only the email content—do **not** include any analysis or rationale.
     """
     try:
-        # 1) Call the LLM
-        completion = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a highly analytical AI Sales Advisor. Provide concise, actionable offer suggestions."},
-                {"role": "user",   "content": offer_prompt}
-            ],
-            temperature=0.7,
-            max_tokens=300
-        )
-        raw_output = completion.choices[0].message.content.strip()
+    # 1) Call the LLM via function‐calling
+    response = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role":"system","content":"You are an expert automotive sales strategist at AOE Motors."},
+            {"role":"user","content":offer_prompt}
+        ],
+        functions=[create_offer_fn],
+        function_call={"name":"create_offer"},
+        temperature=0.7,
+    )
 
-        # 2) Parse JSON exactly like your follow‑up agent does
-        import json
-        try:
-            parsed      = json.loads(raw_output)
-            subject_txt = parsed.get("subject", "").removeprefix("Subject: ").strip()
-            body_md     = parsed.get("body", "")
-        except Exception as e:
-            logging.error(f"JSON parse error in suggest_offer_llm: {e}", exc_info=True)
-            # Fallback to raw output
-            subject_txt = f"Exclusive Offer from AOE Motors"
-            body_md     = raw_output
+    # 2) Parse the guaranteed JSON from the function call
+    msg = response.choices[0].message
+    payload = json.loads(msg.function_call.arguments)
+    subject_txt = payload["subject"].removeprefix("Subject: ").strip()
+    body_md     = payload["body"]
 
-        # 3) Convert only the Markdown body to HTML
-        html_body = md_converter.render(body_md)
+    # 3) Convert only the Markdown body to HTML
+    html_body = md_converter.render(body_md)
 
-        # 4) Return exactly (subject, html_body) so your SMTP call uses the same pattern
-        return subject_txt, html_body
+    # 4) Return exactly what your SMTP caller expects
+    return subject_txt, html_body
 
     except Exception as e:
         logging.error(f"Error suggesting offer: {e}", exc_info=True)
