@@ -463,20 +463,42 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
     vehicle_features   = vehicle_data.get("features", "excellent features")
 
     offer_prompt = f"""
-    You are an expert automotive sales strategist at AOE Motors. Use the lead profile below to produce a JSON object with three keys:
+    You are an expert automotive sales strategist at AOE Motors. Using the lead profile below, generate a JSON object with three keys:
 
-    1. **analysis**: a list of 2–3 bullet points explaining your rationale (for internal logging only).
-    2. **subject**: the email subject line (under 60 characters), prefixed with “Subject:” on its own line.
-    3. **body**: the email copy **only**, written as 3 paragraphs of 2–3 sentences each, plain‑text.
+    1. "analysis" (internal only): A list of 2–3 bullets covering:
+       • Which single incentive you chose—0% APR financing, a cash rebate, an extended warranty, an accessories bundle, or a trade‑in bonus—and why.  
+       • How the customer’s sales notes informed your choice.  
+       • Which one key feature of the {vehicle_name} (from: {vehicle_features}) you’re highlighting.
+
+    2. "subject": A benefit‑driven email subject ≤ 60 characters.
+
+    3. "body": The customer‑facing email, plain text only, structured as **3 paragraphs** of **2–3 sentences** each:
+       - **Paragraph 1**: Start with “Hi {customer_name}, ”. Mention their interest in the {vehicle_name} and spotlight **one** feature.  
+       - **Paragraph 2**: State the exact incentive—e.g. “Enjoy 0% APR for 36 months,” “Receive a $1,200 trade‑in bonus,” or “Get a complimentary 5‑year warranty.”  
+       - **Paragraph 3**: Close with a strong, outcome‑oriented CTA such as “Reply now to claim this offer” or “Call me at (91) 123‑4567 to secure your incentive.”  
+       - After paragraph 3, include this signature block on its own line:
+
+         AOE Motors
+
+    **Do NOT** (under any circumstances):
+    - Explicitly mention “pricing concerns,” “budget,” or “lead score.”  
+    - State customer concerns or doubts in the email text.  
+    - List multiple features—highlight only one.  
+    - Use Markdown, HTML, or JSON in the body.  
+    - Include analysis or internal rationale in the “body” field.
 
     **Lead Profile:**
-    - Name: {customer_name}
-    - Current Vehicle: {current_vehicle or 'N/A'}
-    - Interested Model: {vehicle_name}
+    - Name: {customer_name}  
+    - Current Vehicle: {current_vehicle or 'N/A'}  
+    - Interested Model: {vehicle_name}  
     - Sales Notes: {sales_notes or 'None'}
 
-    **Important**: The **body** field must contain only the email content—do **not** include any analysis or rationale.
+    **Important:**  
+    - Return strictly valid JSON with keys `"analysis"`, `"subject"`, and `"body"`.  
+    - The `"body"` field must contain *only* the customer email copy—no analysis or internal notes.  
     """
+
+
     try:
         # 1) Call the LLM via function‐calling
         response = openai_client.chat.completions.create(
