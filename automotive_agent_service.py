@@ -532,41 +532,43 @@ def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:  # Retur
         )
         # fixed inendation
 
-# NEW: Function to generate call talking points for automation agent
-def generate_call_talking_points_llm(lead_details: dict, vehicle_data: dict) -> str:
-    customer_name = lead_details.get("customer_name", "customer")
-    vehicle_name = lead_details.get("vehicle_interested", "vehicle")
-    current_vehicle = lead_details.get("current_vehicle", "N/A")
-    lead_score_text = lead_details.get("lead_score_text", "New")
-    numeric_lead_score = lead_details.get("numeric_lead_score", 0)
-    sales_notes = lead_details.get("sales_notes", "")
-    vehicle_features = vehicle_data.get("features", "excellent features")
+# NEW: Function to suggest offer for automation agent
+def suggest_offer_llm(lead_details: dict, vehicle_data: dict) -> tuple:
+    # 1) Pull the real fields from your Supabase record
+    customer_name      = lead_details.get("full_name", "Customer")
+    vehicle_name       = lead_details.get("vehicle") or lead_details.get("vehicle_interested", "your selected model")
+    current_vehicle    = lead_details.get("current_vehicle", "N/A")
+    sales_notes        = lead_details.get("sales_notes", "")
+    vehicle_features   = vehicle_data.get("features", "excellent features")
 
+    # 2) Tactical‑advisor prompt
     offer_prompt = f"""
 You are an expert automotive sales strategist at AOE Motors. Using the lead profile below, generate a JSON object with three keys:
 
-1. "analysis": a list of 2–3 bullets explaining
-   - Why you chose this incentive (from financing, rebate, bundle, or trade‑in bonus).
-   - How the customer's sales notes influenced your choice.
-   - Which single key feature of the {vehicle_name} you are highlighting.
+1. "analysis" (internal only): 2–3 bullets explaining:
+   • Which incentive you chose—0% APR, cash rebate, extended warranty, accessories bundle, or trade‑in bonus—and why.
+   • How the customer’s notes (“{sales_notes or 'None'}”) guided your choice.
+   • Which one key feature of the {vehicle_name} (e.g. {vehicle_features}) you’re highlighting.
 
-2. "subject": a benefit‑driven email subject under 60 characters.
+2. "subject": A benefit‑driven email subject under 60 characters.
 
-3. "body": the customer‑facing email copy only, formatted as **3 paragraphs** of **2–3 sentences** each:
-   • **Paragraph 1**: Begin with “Hi {customer_name}, ” then mention their interest in the {vehicle_name} and **highlight one key feature** from this list:  
-     {vehicle_features}  
-   • **Paragraph 2**: Clearly state the exact offer terms (e.g. “I’m offering you a $1,000 rebate on your new {vehicle_name}.”).  
-   • **Paragraph 3**: Close with a strong, outcome‑oriented CTA (e.g. “Reply now to claim your rebate,” or “Call me at (555) 123‑4567 to finalize this offer”).
+3. "body": The customer‑facing email copy only, plain text, formatted as **3 paragraphs** of **2–3 sentences** each:
+   - **Paragraph 1**: Start with “Hi {customer_name}, ”, mention their interest in the {vehicle_name}, and spotlight one feature.
+   - **Paragraph 2**: State the exact incentive—e.g. “Enjoy 0% APR for 36 months,” “Receive a $1,200 trade‑in bonus,” or “Get a complimentary 5‑year warranty.”
+   - **Paragraph 3**: Close with a clear tactical CTA (“Reply now to claim this offer” or “Call me at (555) 123‑4567 to lock it in”).
+
+After paragraph 3, on its own line put:
+
+AOE Motors
+
+**Do NOT** mention “pricing concerns,” “budget,” or lead scores.  
+Return strictly valid JSON with keys "analysis", "subject", and "body".
 
 **Lead Profile:**
 - Name: {customer_name}
-- Current Vehicle: {current_vehicle or 'N/A'}
+- Current Vehicle: {current_vehicle}
 - Interested Model: {vehicle_name}
 - Sales Notes: {sales_notes or 'None'}
-
-**Important**:  
-- The **body** field must include only the email content—do **not** include analysis or any JSON.  
-- Return strictly valid JSON with keys "analysis", "subject", and "body".
 """
 
     try:
