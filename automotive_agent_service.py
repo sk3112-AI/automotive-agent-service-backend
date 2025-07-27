@@ -762,11 +762,11 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
             if sales_notes.strip():
             # Call the relevance checker
                 notes_relevance = check_notes_relevance_llm(sales_notes)
-                logging.info(f"Sales notes relevance for {lead_data['request_id']}: {notes_relevance}")
+                logging.info(f"Sales notes relevance for {lead_data['lead_id']}: {notes_relevance}")
 
             # Skip if explicitly irrelevant
             if notes_relevance != "RELEVANT":
-                logging.info(f"Skipping follow‑up for {lead_data['request_id']} due to irrelevant notes.")
+                logging.info(f"Skipping follow‑up for {lead_data['lead_id']} due to irrelevant notes.")
                 continue
             # fixed inendation  
 
