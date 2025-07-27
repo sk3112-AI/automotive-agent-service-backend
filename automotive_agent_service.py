@@ -778,6 +778,10 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
                 logging.warning(f"Vehicle details for {lead_data['vehicle']} not found. Skipping follow-up email for {lead_id}.")
                 continue
 
+            # 3) Analyze sentiment for use in the follow‑up email
+                               notes_sentiment = analyze_sentiment_llm(sales_notes)
+                               logging.info(f"Sales notes sentiment for lead {lead_id}: {notes_sentiment}")
+
             # 4. Generate email content using LLM (reusing dashboard logic)
             subject, body_markdown, body_html = generate_followup_email_llm(
                 lead_data['full_name'], lead_data['email'], lead_data['vehicle'], sales_notes, vehicle_details,
