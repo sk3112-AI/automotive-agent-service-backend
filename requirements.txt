@@ -4,6 +4,7 @@ pandas
 openai
 supabase
 python-dotenv
+google-cloud-aiplatform
 # Markdown‑to‑HTML converter used by suggest_offer_llm
 markdown-it-py
 # tzdata # No longer explicitly needed here if installed via apt-get in Dockerfile, but harmless if left.

@@ -7,6 +7,7 @@ import pandas as pd
 from openai import OpenAI
 from supabase import create_client, Client
 from datetime import datetime, date, timedelta, timezone
+from typing import List
 import json
 import logging
 import sys
@@ -64,12 +65,21 @@ AOE_VEHICLE_DATA = {
     }
 }
 # ─────────────────────────────────────────────────────────────────────
+# NEW: Store public URLs of consistent car images from Google Cloud Storage
+AOE_VEHICLE_IMAGES = {
+    "AOE Apex": "https://storage.googleapis.com/aoe-motors-images/AOE%20Apex.jpg",
+    "AOE Thunder": "https://storage.googleapis.com/aoe-motors-images/AOE%20Thunder.jpg",
+    "AOE Volt": "https://storage.googleapis.com/aoe-motors-images/AOE%20Volt.jpg"
+}
 
 
 # --- GLOBAL CONFIGURATIONS FOR ANALYTICS AND AUTOMATION SERVICE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Who gets the reminder
+SALES_TEAM_EMAIL = "karthik.sundararaju@gmail.com"
 
 # SMTP Credentials for this new service (using smtplib)
 EMAIL_HOST = os.getenv("EMAIL_HOST")
@@ -724,6 +734,48 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
         logging.error(f"Error processing analytics query: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An error occurred while processing your analytics query: {e}")
 
+#Helper function for test drive due reminder emails
+# Helper: format the “test drive due” reminder email for the sales team
+def _format_testdrive_due_email(lead: dict) -> tuple[str, str]:
+    """
+    Returns (subject, html_body).
+    Expects keys: full_name, email, vehicle, booking_date (YYYY-MM-DD), location,
+                  numeric_lead_score, sales_notes, request_id
+    """
+    cust   = lead.get("full_name") or "Customer"
+    email  = lead.get("email") or ""
+    veh    = lead.get("vehicle") or "vehicle"
+    # booking_date is a DATE in Supabase -> present it clearly
+    when_d = lead.get("booking_date") or "—"
+    loc    = lead.get("location") or "—"
+    score  = lead.get("numeric_lead_score", 0)
+    notes  = lead.get("sales_notes") or "—"
+    req_id = lead.get("request_id") or "—"
+
+    subject = f"[Reminder] Test drive due in <24h — {cust} ({veh})"
+    body = f"""
+    <p><b>Test drive due within 24 hours</b></p>
+    <p><b>Customer:</b> {cust} &lt;{email}&gt;<br/>
+       <b>Vehicle:</b> {veh}<br/>
+       <b>Test drive date:</b> {when_d}<br/>
+       <b>Location:</b> {loc}<br/>
+       <b>Lead score:</b> {score}<br/>
+       <b>Request ID:</b> {req_id}</p>
+
+    <p><b>Sales notes</b><br/>{notes}</p>
+
+    <p><b>Checklist</b></p>
+    <ul>
+      <li>Call/SMS customer to reconfirm slot</li>
+      <li>Vehicle prepped & charged/fueled</li>
+      <li>Route & paperwork ready</li>
+      <li>Personalization talking points (features to highlight)</li>
+    </ul>
+
+    <p>— AOE Agent</p>
+    """
+    return subject, body
+
 
 # --- BATCH AGENT ENDPOINTS (User-Triggered via Dashboard UI) ---
 
@@ -885,6 +937,90 @@ async def trigger_batch_offer_agent_endpoint(request_data: BatchTriggerRequest):
         "sent_count": processed_count,
         "failed_count": failed_count
     }
+
+from typing import List  # if not already imported
+from datetime import datetime, timedelta, timezone
+
+@app.post("/ops/mark-testdrives-due")
+async def mark_testdrives_due():
+    """
+    Mark bookings as 'Test Drive Due' and notify the sales team when
+    TODAY == (booking_date - 1 day).
+
+    Idempotency: we skip rows already in 'Test Drive Due' or in 'Converted/Lost'.
+    """
+    now_utc = datetime.now(timezone.utc)
+    target_date = (now_utc + timedelta(days=1)).date()  # booking_date to match (DATE)
+    target_str  = target_date.isoformat()
+
+    try:
+        # Pull only the rows whose booking_date equals tomorrow’s date,
+        # excluding Converted/Lost. (Idempotency guard handled below.)
+        res = (
+            supabase
+            .from_(SUPABASE_TABLE_NAME)
+            .select(
+                "request_id, full_name, email, vehicle, booking_date, location, "
+                "numeric_lead_score, sales_notes, action_status"
+            )
+            .eq("booking_date", target_str)
+            .neq("action_status", "Converted")
+            .neq("action_status", "Lost")
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as e:
+        logging.error(f"Supabase query failed in /ops/mark-testdrives-due: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Supabase query failed")
+
+    updated, emailed, skipped = 0, 0, 0
+
+    for lead in rows:
+        current_status = (lead.get("action_status") or "").lower()
+        if current_status == "Test Drive Due":
+            # Idempotency guard: already marked; don’t update or resend
+            skipped += 1
+            continue
+
+        # 1) Update status -> 'Test Drive Due'
+        try:
+            upd = (
+                supabase
+                .from_(SUPABASE_TABLE_NAME)
+                .update({"action_status": "Test Drive Due"})
+                .eq("request_id", lead["request_id"])
+                .execute()
+            )
+            if upd.data:
+                updated += 1
+        except Exception as e:
+            logging.error(f"Update failed for {lead.get('request_id')}: {e}", exc_info=True)
+            continue  # still try next lead
+
+        # 2) Email sales team
+        try:
+            subject, html_body = _format_testdrive_due_email(lead)
+            ok = send_email_via_smtp(
+                SALES_TEAM_EMAIL,
+                subject,
+                html_body,
+                request_id=lead.get("request_id"),
+                event_type="testdrive_due_notice"
+            )
+            if ok:
+                emailed += 1
+        except Exception as e:
+            logging.error(f"Failed sending reminder for {lead.get('request_id')}: {e}", exc_info=True)
+
+    return {
+        "status": "ok",
+        "target_booking_date": target_str,
+        "found": len(rows),
+        "updated_status_to_due": updated,
+        "emails_sent": emailed,
+        "skipped_already_due": skipped
+    }
+
 
 
 # --- ENDPOINTS FOR LEAD INSIGHTS (Future extension if needed from agent service) ---
