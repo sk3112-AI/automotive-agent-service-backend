@@ -11,6 +11,7 @@ from typing import List
 import json
 import logging
 import sys
+import string  # ✅ NEW
 import smtplib # Using smtplib for this service's emails as requested
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -197,6 +198,13 @@ def analyze_sentiment_llm(text):
         return sentiment if sentiment in ["POSITIVE", "NEUTRAL", "NEGATIVE"] else "NEUTRAL"
     except Exception as e: logging.error(f"Error analyzing sentiment: {e}", exc_info=True); return "NEUTRAL"
 
+def _norm_relevance(val: str) -> str:  # ✅ NEW
+         cleaned = (val or "").strip().strip('"').strip("'").strip()  # ✅ NEW
+         cleaned = cleaned.translate(str.maketrans("", "", string.punctuation)).upper()  # ✅ NEW
+if cleaned.startswith("REL") or cleaned == "YES":  # ✅ NEW
+         return "RELEVANT"  # ✅ NEW
+         return "IRRELEVANT"  # ✅ NEW
+
 def check_notes_relevance_llm(sales_notes):
     if not sales_notes.strip(): return "IRRELEVANT"
     prompt = f"""
@@ -210,8 +218,9 @@ def check_notes_relevance_llm(sales_notes):
             model="gpt-3.5-turbo", messages=[{"role": "system", "content": "You are an AI assistant that evaluates the relevance of sales notes for email generation. Your only output is 'RELEVANT' or 'IRRELEVANT'."}, {"role": "user", "content": prompt}],
             temperature=0.0, max_tokens=10
         )
-        relevance = completion.choices[0].message.content.strip().upper()
-        return relevance if relevance in ["RELEVANT", "IRRELEVANT"] else "IRRELEVANT"
+                    raw = completion.choices[0].message.content or ""        # ✅ NEW
+                    relevance = _norm_relevance(raw)                         # ✅ NEW
+                    return relevance  
     except Exception as e: logging.error(f"Error checking notes relevance: {e}", exc_info=True); return "IRRELEVANT"
 
 # MODIFIED: generate_followup_email logic from dashboard.py, now in agent service
@@ -809,6 +818,9 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
 
             # 2. Re‑evaluate sales notes relevance/sentiment (similar to dashboard logic)
             sales_notes = lead_data.get('sales_notes', '')
+
+                             # ✅ NEW: default to IRRELEVANT to avoid UnboundLocalError
+                              notes_relevance = "IRRELEVANT"  # ✅ NEW
 
             # Only proceed if there are notes to evaluate
             if sales_notes.strip():
