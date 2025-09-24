@@ -199,11 +199,11 @@ def analyze_sentiment_llm(text):
     except Exception as e: logging.error(f"Error analyzing sentiment: {e}", exc_info=True); return "NEUTRAL"
 
 def _norm_relevance(val: str) -> str:  # ✅ NEW
-         cleaned = (val or "").strip().strip('"').strip("'").strip()  # ✅ NEW
-         cleaned = cleaned.translate(str.maketrans("", "", string.punctuation)).upper()  # ✅ NEW
-if cleaned.startswith("REL") or cleaned == "YES":  # ✅ NEW
-         return "RELEVANT"  # ✅ NEW
-         return "IRRELEVANT"  # ✅ NEW
+    cleaned = (val or "").strip().strip('"').strip("'").strip()  # ✅ NEW
+    cleaned = cleaned.translate(str.maketrans("", "", string.punctuation)).upper()  # ✅ NEW
+if cvleaned.startswith("REL") or cleaned == "YES":  # ✅ NEW
+    return "RELEVANT"  # ✅ NEW
+    return "IRRELEVANT"  # ✅ NEW
 
 def check_notes_relevance_llm(sales_notes):
     if not sales_notes.strip(): return "IRRELEVANT"
@@ -218,7 +218,7 @@ def check_notes_relevance_llm(sales_notes):
             model="gpt-3.5-turbo", messages=[{"role": "system", "content": "You are an AI assistant that evaluates the relevance of sales notes for email generation. Your only output is 'RELEVANT' or 'IRRELEVANT'."}, {"role": "user", "content": prompt}],
             temperature=0.0, max_tokens=10
         )
-        raw = completion.choices[0].message.content or ""        # ✅ NEW
+        raw = completion.choices[0].message.content or ""        # ✅ NEW fixed
         relevance = _norm_relevance(raw)                         # ✅ NEW
         return relevance  
     except Exception as e: logging.error(f"Error checking notes relevance: {e}", exc_info=True); return "IRRELEVANT"
@@ -819,8 +819,8 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
             # 2. Re‑evaluate sales notes relevance/sentiment (similar to dashboard logic)
             sales_notes = lead_data.get('sales_notes', '')
 
-                             # ✅ NEW: default to IRRELEVANT to avoid UnboundLocalError
-                              notes_relevance = "IRRELEVANT"  # ✅ NEW
+                # ✅ NEW: default to IRRELEVANT to avoid UnboundLocalError
+                notes_relevance = "IRRELEVANT"  # ✅ NEW
 
             # Only proceed if there are notes to evaluate
             if sales_notes.strip():
@@ -1044,4 +1044,4 @@ async def mark_testdrives_due():
 #     # Logic to fetch pre-calculated insights from a database table
 #     pass
 
-# To run this service locally: uvicorn automotive_agent_service:app --reload --port 8001
+# To run this service locally: uvicorn automotive_agent_service:app --reload --port 8001; done with indendation
