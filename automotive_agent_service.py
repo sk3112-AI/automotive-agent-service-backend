@@ -201,8 +201,8 @@ def analyze_sentiment_llm(text):
 def _norm_relevance(val: str) -> str:  # ✅ NEW
     cleaned = (val or "").strip().strip('"').strip("'").strip()  # ✅ NEW
     cleaned = cleaned.translate(str.maketrans("", "", string.punctuation)).upper()  # ✅ NEW
-if cvleaned.startswith("REL") or cleaned == "YES":  # ✅ NEW
-    return "RELEVANT"  # ✅ NEW
+    if cvleaned.startswith("REL") or cleaned == "YES":  # ✅ NEW
+        return "RELEVANT"  # ✅ NEW
     return "IRRELEVANT"  # ✅ NEW
 
 def check_notes_relevance_llm(sales_notes):
