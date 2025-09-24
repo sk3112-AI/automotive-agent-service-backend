@@ -218,9 +218,9 @@ def check_notes_relevance_llm(sales_notes):
             model="gpt-3.5-turbo", messages=[{"role": "system", "content": "You are an AI assistant that evaluates the relevance of sales notes for email generation. Your only output is 'RELEVANT' or 'IRRELEVANT'."}, {"role": "user", "content": prompt}],
             temperature=0.0, max_tokens=10
         )
-                    raw = completion.choices[0].message.content or ""        # ✅ NEW
-                    relevance = _norm_relevance(raw)                         # ✅ NEW
-                    return relevance  
+        raw = completion.choices[0].message.content or ""        # ✅ NEW
+        relevance = _norm_relevance(raw)                         # ✅ NEW
+        return relevance  
     except Exception as e: logging.error(f"Error checking notes relevance: {e}", exc_info=True); return "IRRELEVANT"
 
 # MODIFIED: generate_followup_email logic from dashboard.py, now in agent service
