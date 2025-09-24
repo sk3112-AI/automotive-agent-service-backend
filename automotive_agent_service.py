@@ -819,8 +819,8 @@ async def trigger_batch_followup_email_agent_endpoint(request_data: BatchTrigger
             # 2. Re‑evaluate sales notes relevance/sentiment (similar to dashboard logic)
             sales_notes = lead_data.get('sales_notes', '')
 
-                # ✅ NEW: default to IRRELEVANT to avoid UnboundLocalError
-                notes_relevance = "IRRELEVANT"  # ✅ NEW
+            # ✅ NEW: default to IRRELEVANT to avoid UnboundLocalError
+            notes_relevance = "IRRELEVANT"  # ✅ NEW
 
             # Only proceed if there are notes to evaluate
             if sales_notes.strip():
