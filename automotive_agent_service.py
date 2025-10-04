@@ -676,7 +676,7 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
         s_date = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
         e_date_disp = (datetime.strptime(end_date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%b %d, %Y")
         label = f"{lead_status.lower()} leads" if lead_status != "All" else "total leads"
-        msg = f"📊 {label.capitalize()}: **{result_count}** (filtered from {s_date} to {e_date})"
+        msg = f"📊 {label.capitalize()}: **{result_count}** (filtered from {s_date} to {e_date_disp})"
 
         return {"result_message": msg}
 
