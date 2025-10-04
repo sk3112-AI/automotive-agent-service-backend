@@ -7,7 +7,7 @@ import pandas as pd
 from openai import OpenAI
 from supabase import create_client, Client
 from datetime import datetime, date, timedelta, timezone
-from typing import List
+from typing import Optional, List
 import json
 import logging
 import sys
@@ -591,157 +591,98 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
     query_text: str
-    selected_location: str
     start_date: str # Send as ISO format string
     end_date: str # Send as ISO format string
 
 @app.post("/analyze-query")
 async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
-    query_text = request_data.query_text
-    selected_location = request_data.selected_location 
+    query_text = (request_data.query_text or "").strip()
     start_date_str = request_data.start_date
     end_date_str = request_data.end_date
 
     try:
-        # Fetch all data from Supabase for analytics (this service fetches its own data)
+        # 1) Pull data
         response_data = supabase.from_(SUPABASE_TABLE_NAME).select(
-            "request_id, full_name, email, vehicle, booking_date, current_vehicle, location, time_frame, action_status, sales_notes, lead_score, numeric_lead_score, booking_timestamp"
+            "request_id, full_name, email, vehicle, booking_date, current_vehicle, "
+            "time_frame, action_status, sales_notes, lead_score, numeric_lead_score, booking_timestamp"
         ).order('booking_timestamp', desc=True).execute()
 
         if not response_data.data:
             return {"result_message": "No bookings data available for analytics."}
-        
-        all_bookings_df = pd.DataFrame(response_data.data)
-        all_bookings_df['booking_timestamp'] = pd.to_datetime(all_bookings_df['booking_timestamp'])
-        
-        if all_bookings_df['booking_timestamp'].dt.tz is None:
-            all_bookings_df['booking_timestamp'] = all_bookings_df['booking_timestamp'].dt.tz_localize('UTC')
-        else:
-            all_bookings_df['booking_timestamp'] = all_bookings_df['booking_timestamp'].dt.tz_convert('UTC')
 
-        # --- LLM PROMPT and FILTERING LOGIC (COPIED FROM DASHBOARD.PY'S INTERPRET_AND_QUERY) ---
-        query = query_text.lower().strip()
-        
-        today_dt_ist = datetime.now(ZoneInfo('Asia/Kolkata')) if ZoneInfo else datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=5, minutes=30) # Ensure IST reference
-        today_dt_utc = today_dt_ist.astimezone(timezone.utc)
-        yesterday_dt_utc = (today_dt_ist - timedelta(days=1)).astimezone(timezone.utc)
-        last_week_start_dt_utc = (today_dt_ist - timedelta(days=7)).astimezone(timezone.utc)
-        last_month_start_dt_utc = (today_dt_ist - timedelta(days=30)).astimezone(timezone.utc)
-        last_year_start_dt_utc = (today_dt_ist - timedelta(days=365)).astimezone(timezone.utc)
+        df = pd.DataFrame(response_data.data)
 
-        # The core LLM prompt for interpretation
-        prompt = f"""
-        Analyze the following user query about automotive leads.
-        Extract the 'lead_status', 'time_frame', and optionally 'location'.
-        Return a JSON object with 'lead_status', 'time_frame', and 'location'.
-        If the query cannot be interpreted, return {{"query_type": "UNINTERPRETED"}}.
+        # 2) Normalize timestamps → UTC (tolerant to tz-naive rows)
+        #    We'll compare with half-open UTC window derived from sidebar dates.
+        df["booking_timestamp"] = pd.to_datetime(df["booking_timestamp"], errors="coerce", utc=True)
 
-        Lead Statuses: "Hot", "Warm", "Cold", "Converted", "Lost", "All" (if no specific status is mentioned but asking for total leads, e.g., "total leads today").
-        Time Frames: "TODAY", "YESTERDAY", "LAST_WEEK" (last 7 days), "LAST_MONTH" (last 30 days), "LAST_YEAR" (last 365 days), "ALL_TIME".
-        Locations: "New York", "Los Angeles", "Chicago", "Houston", "Miami", "All Locations" (if no specific location is mentioned, e.g., "total leads in New York").
+        # 3) Sidebar date window (half-open range) in UTC
+        #    Assume sidebar dates are in local (human) terms; treat them as all-day inclusive.
+        start_dt_utc = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt_utc = (datetime.strptime(end_date_str, "%Y-%m-%d") + timedelta(days=1)).replace(tzinfo=timezone.utc)
 
-        Examples:
-        - User: "how many hot leads last week in New York?"
-        - Output: {{"lead_status": "Hot", "time_frame": "LAST_WEEK", "location": "New York"}}
+        df = df[(df["booking_timestamp"] >= start_dt_utc) & (df["booking_timestamp"] < end_dt_utc)]
 
-        - User: "total leads today"
-        - Output: {{"lead_status": "All", "time_frame": "TODAY", "location": "All Locations"}}
-
-        - User: "cold leads from Houston"
-        - Output: {{"lead_status": "Cold", "time_frame": "ALL_TIME", "location": "Houston"}}
-
-        - User: "total conversions"
-        - Output: {{"lead_status": "Converted", "time_frame": "ALL_TIME", "location": "All Locations"}}
-
-        - User: "leads lost yesterday"
-        - Output: {{"lead_status": "Lost", "time_frame": "YESTERDAY", "location": "All Locations"}}
-
-        - User: "warm leads last month"
-        - Output: {{"lead_status": "Warm", "time_frame": "LAST_MONTH", "location": "All Locations"}}
-
-        User Query: "{query_text}"
-        """
-        
-        completion = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo", messages=[{"role": "system", "content": "You are a helpful AI assistant that interprets user queries about sales data and outputs a JSON object. Only use the provided categories and timeframes."}, {"role": "user", "content": prompt}],
-            temperature=0.0, max_tokens=150, response_format={"type": "json_object"}
-        )
-        response_json = json.loads(completion.choices[0].message.content.strip())
-        
-        lead_status_filter = response_json.get("lead_status")
-        time_frame_filter = response_json.get("time_frame")
-        location_filter_nlq = response_json.get("location")
-
-        if response_json.get("query_type") == "UNINTERPRETED":
-            return {"result_message": "This cannot be processed now - Restricted for demo. Please try queries about specific lead types (Hot, Warm, Cold, Converted, Lost), locations, or timeframes (today, last week, last month)."}
-
-        filtered_df = all_bookings_df.copy()
-
-        # Apply time filter based on the NLQ interpreted timeframe (using UTC dates)
-        if time_frame_filter == "TODAY":
-            filtered_df = filtered_df[filtered_df['booking_timestamp'].dt.date == today_dt_utc.date()]
-        elif time_frame_filter == "YESTERDAY":
-            filtered_df = filtered_df[filtered_df['booking_timestamp'].dt.date == yesterday_dt_utc.date()]
-        elif time_frame_filter == "LAST_WEEK":
-            filtered_df = filtered_df[filtered_df['booking_timestamp'] >= last_week_start_dt_utc]
-        elif time_frame_filter == "LAST_MONTH":
-            filtered_df = filtered_df[filtered_df['booking_timestamp'] >= last_month_start_dt_utc]
-        elif time_frame_filter == "LAST_YEAR":
-            filtered_df = filtered_df[filtered_df['booking_timestamp'] >= last_year_start_dt_utc]
-        # "ALL_TIME" means no date filter applied here, it relies on sidebar filters
-
-        # Apply lead status filter
-        if lead_status_filter and lead_status_filter != "All":
-            if lead_status_filter in ["Converted", "Lost"]:
-                filtered_df = filtered_df[filtered_df['action_status'] == lead_status_filter]
+        # 4) Lead-status intent via LLM (but ignore time_frame/location)
+        intent = {"lead_status": "All"}
+        try:
+            prompt = f"""
+            Analyze the user query about automotive leads. Output strict JSON with only:
+            {{"lead_status": "Hot|Warm|Cold|Converted|Lost|All"}}
+            If unsure, respond with {{"lead_status": "All"}}.
+            User Query: "{query_text}"
+            """
+            completion = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "Return only a JSON object with the allowed lead_status value."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=50,
+                response_format={"type": "json_object"},
+            )
+            intent = json.loads(completion.choices[0].message.content.strip() or "{}")
+        except Exception:
+            # Fallback: keyword heuristic
+            q = query_text.lower()
+            if "convert" in q:
+                intent["lead_status"] = "Converted"
+            elif "lost" in q:
+                intent["lead_status"] = "Lost"
+            elif "hot" in q:
+                intent["lead_status"] = "Hot"
+            elif "warm" in q:
+                intent["lead_status"] = "Warm"
+            elif "cold" in q:
+                intent["lead_status"] = "Cold"
             else:
-                filtered_df = filtered_df[filtered_df['lead_score'].str.lower() == lead_status_filter.lower()]
-            
-        # Apply location filter
-        if location_filter_nlq and location_filter_nlq != "All Locations":
-            filtered_df = filtered_df[filtered_df['location'] == location_filter_nlq]
-        
-        result_count = filtered_df.shape[0]
-        
-        # --- Format the output message ---
-        message_parts = []
-        if lead_status_filter and lead_status_filter != "All":
-            message_parts.append(f"{lead_status_filter.lower()} leads")
-        else:
-            message_parts.append("total leads")
-        
-        if time_frame_filter != "ALL_TIME":
-            message_parts.append(f" {time_frame_filter.lower().replace('_', ' ')}")
-        
-        if location_filter_nlq and location_filter_nlq != "All Locations":
-            message_parts.append(f" in {location_filter_nlq}")
-        
-        # Clarify that results are within the dashboard's sidebar's filters
-        # The dashboard passes its filters, so we format the message to reflect them
-        sidebar_context_str = ""
-        if start_date_str and end_date_str:
-            s_date = datetime.strptime(start_date_str, '%Y-%m-%d').strftime('%b %d, %Y')
-            e_date = datetime.strptime(end_date_str, '%Y-%m-%d').strftime('%b %d, %Y')
-            sidebar_context_str += f" (filtered from {s_date} to {e_date})"
-        if selected_location != "All Locations":
-            sidebar_context_str += f" in {selected_location}"
+                intent["lead_status"] = "All"
 
-        result_message = f"📊 {' '.join(message_parts).capitalize()}: **{result_count}**{sidebar_context_str}"
+        lead_status = (intent.get("lead_status") or "All").title()
 
-        # "refine time period" message logic
-        start_dt_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-        end_dt_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
-        if result_count == 0 and (end_dt_date - start_dt_date).days < 7:
-            result_message += "<br>Consider expanding the date range in the dashboard's sidebar filters if you expect more results."
-        
-        return {"result_message": result_message}
+        # 5) Apply status filter only
+        filtered = df.copy()
+        if lead_status in {"Converted", "Lost"}:
+            filtered = filtered[filtered["action_status"] == lead_status]
+        elif lead_status in {"Hot", "Warm", "Cold"}:
+            # Use the label column directly (your app already standardizes labels)
+            filtered = filtered[filtered["lead_score"].fillna("").str.lower() == lead_status.lower()]
+        # else "All": no extra filter
 
-    except json.JSONDecodeError:
-        logging.error("LLM did not return a valid JSON for /analyze-query.", exc_info=True)
-        raise HTTPException(status_code=500, detail="LLM did not return a valid JSON for analytics query.")
+        result_count = int(filtered.shape[0])
+
+        # 6) Compose output message
+        s_date = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
+        e_date = datetime.strptime(end_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
+        label = f"{lead_status.lower()} leads" if lead_status != "All" else "total leads"
+        msg = f"📊 {label.capitalize()}: **{result_count}** (filtered from {s_date} to {e_date})"
+
+        return {"result_message": msg}
+
     except Exception as e:
         logging.error(f"Error processing analytics query: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An error occurred while processing your analytics query: {e}")
+        raise HTTPException(status_code=500, detail=f"Analytics error: {e}")
 
 #Helper function for test drive due reminder emails
 # Helper: format the “test drive due” reminder email for the sales team
@@ -1032,8 +973,6 @@ async def mark_testdrives_due():
         "emails_sent": emailed,
         "skipped_already_due": skipped
     }
-
-
 
 # --- ENDPOINTS FOR LEAD INSIGHTS (Future extension if needed from agent service) ---
 # For now, Lead Insights remains an indicator in dashboard.py, but this service could
