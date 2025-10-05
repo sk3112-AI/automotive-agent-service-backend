@@ -656,7 +656,7 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             chart_terms = [
                 "chart", "trend", "trends", "distribution", "histogram",
                 "score distribution", "daily", "per day", "over time",
-                "timeline", "time series", "time-series", "line"
+                "timeline", "time series", "time-series", "line","leads by status"
             ]
             return any(t in s for t in chart_terms)
  
@@ -683,28 +683,66 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             vc = bands.value_counts().sort_index()
             return {"kind":"bar","labels": list(vc.index.astype(str)), "values": vc.tolist()}
 
+
         def _converted_lost_trend(_df):
             _df = _df.copy()
-            _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce", utc=True).dt.date
-            g = (
-            _df.groupby(["date", "action_status"])
-            .size()
-            .unstack(fill_value=0)
-            .sort_index()  # ensure chronological order
+            _df["ts"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce", utc=True)
+            _df["date"] = _df["ts"].dt.date
+
+    # daily counts first
+            daily = (
+                _df.groupby(["date", "action_status"])
+                    .size()
+                    .unstack(fill_value=0)
+                    .sort_index()
             )
-            x = [d.isoformat() for d in g.index]
+
+            # if period is long, aggregate weekly to reduce "zero lines"
+            # rule of thumb: more than ~21 distinct days ⇒ weekly
+            if len(daily.index) > 21:
+            # convert the index to Timestamp for weekly grouping
+                di = pd.to_datetime(daily.index)
+                week_start = di.to_period("W-MON").start_time  # ISO-like week starting Mon
+                daily.index = week_start
+                g = daily.groupby(daily.index).sum().sort_index()
+                x_index = g.index
+            else:
+                g = daily
+                x_index = pd.to_datetime(g.index)
+
+    # build series
             series = {}
             if "Converted" in g.columns:
                 series["Converted"] = g["Converted"].astype(int).tolist()
             if "Lost" in g.columns:
                 series["Lost"] = g["Lost"].astype(int).tolist()
+
+    # if there are no Converted/Lost columns at all, fallback to total leads
             if not series:
-                # fallback: plot total leads per day if no Converted/Lost present
-                total_per_day = _df.groupby("date").size().reindex(g.index, fill_value=0).astype(int).tolist()
-                series["Leads"] = total_per_day
+                total = _df.groupby("date").size()
+            if len(daily.index) > 21:
+                di_total = pd.to_datetime(total.index)
+                wk = di_total.to_period("W-MON").start_time
+                total = total.groupby(wk).sum().sort_index()
+                x_index = total.index
+            else:
+                x_index = pd.to_datetime(total.index)
+            series["Leads"] = total.astype(int).tolist()
+
+    # optionally drop rows where both series are zero (to avoid long flat line)
+    # keep at least one point to avoid empty plot
+            if set(series.keys()) == {"Converted", "Lost"}:
+                mask_nonzero = (g.get("Converted", 0) + g.get("Lost", 0)) > 0
+                if mask_nonzero.any():
+                    g = g[mask_nonzero]
+                    x_index = x_index[mask_nonzero]
+                    series["Converted"] = g.get("Converted", pd.Series(dtype=int)).astype(int).tolist()
+                    series["Lost"] = g.get("Lost", pd.Series(dtype=int)).astype(int).tolist()
+
+            x = [pd.Timestamp(t).date().isoformat() for t in x_index]
             return {"kind": "line", "x": x, "series": series}
 
-        
+       
         def _trend_for_status(_df, statuses):
             _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce").dt.date
             label_map = {"hot":"Hot","warm":"Warm","cold":"Cold"}
@@ -773,6 +811,12 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
 
         if intent == "CHART":
     # Choose chart type by keywords
+            # status breakdown (e.g., "leads by status", "status chart")
+            if any(t in q for t in ["status", "by status", "leads by status"]):
+                payload = _status_breakdown(df)
+                msg = f"📊 Leads by status (using current filters: {s_label} → {e_label})"
+                return {"result_type": "CHART", "result_message": msg, "payload": payload}
+
             if any(k in q for k in ["distribution","histogram","score"]):
                 payload = _score_distribution(df)
                 msg = f"📊 Lead score distribution (using current filters: {s_label} → {e_label})"
