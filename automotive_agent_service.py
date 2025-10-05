@@ -608,7 +608,7 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
         ).order('booking_timestamp', desc=True).execute()
 
         if not response_data.data:
-            return {"result_message": "No bookings data available for analytics."}
+            return {"result_type": "TEXT", "result_message": "No bookings data available for analytics."}
 
         df = pd.DataFrame(response_data.data)
 
@@ -619,68 +619,180 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
         # 3) Sidebar date window (half-open range) in UTC
         #    Assume sidebar dates are in local (human) terms; treat them as all-day inclusive.
         start_dt_utc = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt_utc = datetime.strptime(end_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)  # EXCLUSIVE
+        end_dt_utc   = (datetime.strptime(end_date_str, "%Y-%m-%d") + timedelta(days=1)).replace(tzinfo=timezone.utc)
 
-        df = df[(df["booking_timestamp"] >= start_dt_utc) & (df["booking_timestamp"] < end_dt_utc)]
+        df = df[(df["booking_timestamp"] >= start_dt_utc) & (df["booking_timestamp"] < end_dt_utc)].copy()
 
-        # 4) Lead-status intent via LLM (but ignore time_frame/location)
-        intent = {"lead_status": "All"}
-        try:
-            prompt = f"""
-            Analyze the user query about automotive leads. Output strict JSON with only:
-            {{"lead_status": "Hot|Warm|Cold|Converted|Lost|All"}}
-            If unsure, respond with {{"lead_status": "All"}}.
-            User Query: "{query_text}"
-            """
-            completion = openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "Return only a JSON object with the allowed lead_status value."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=50,
-                response_format={"type": "json_object"},
+        # --- STRONG GUARDRails + NL intent router (prototype, no LLM) ---
+        q = (query_text or "").lower().strip()
+
+        # 4.1) Guardrails: only allow a small whitelist
+        ALLOWED_TOKENS = {
+            "lead","leads","total","hot","warm","cold",
+            "converted","lost","chart","trend","distribution","score",
+            "who","whom","call","rank","prioritize","list"
+        }
+        if not any(tok in q for tok in ALLOWED_TOKENS):
+            return {
+                "result_type": "TEXT",
+                "result_message": (
+                "🙅 Not relevant. Try: **'total leads'**, **'hot leads'**, "
+                "**'trend conversions'**, **'lead score distribution'**, or **'who should I call'** "
+                "(using the current date filters)."
+               )    
+            }
+
+
+        # 4.3) Normalize commonly used columns
+        df["lead_score"] = df["lead_score"].fillna("")
+        df["numeric_lead_score"] = pd.to_numeric(df["numeric_lead_score"], errors="coerce").fillna(0).astype(int)
+
+        # 4.4) Intent routing
+        def wants_rank(s: str) -> bool:
+            return any(k in s for k in ["who should i call","whom should i call","call list","calllist","prioritize","rank"])
+
+        def wants_chart(s: str) -> bool:
+            return any(k in s for k in ["chart","trend","distribution","histogram","score distribution","daily","per day"])
+
+        intent = "COUNT"
+        if wants_rank(q):
+            intent = "RANK"
+        elif wants_chart(q):
+            intent = "CHART"
+
+        # 4.5) Helpers
+        def _status_breakdown(_df):
+            counts = (
+                _df["lead_score"].str.lower().map({"hot":"Hot","warm":"Warm","cold":"Cold"}).fillna("Unknown")
+                .value_counts().sort_index()
             )
-            intent = json.loads(completion.choices[0].message.content.strip() or "{}")
-        except Exception:
-            # Fallback: keyword heuristic
-            q = query_text.lower()
-            if "convert" in q:
-                intent["lead_status"] = "Converted"
-            elif "lost" in q:
-                intent["lead_status"] = "Lost"
-            elif "hot" in q:
-                intent["lead_status"] = "Hot"
-            elif "warm" in q:
-                intent["lead_status"] = "Warm"
-            elif "cold" in q:
-                intent["lead_status"] = "Cold"
-            else:
-                intent["lead_status"] = "All"
+            return {"kind":"bar","labels": list(counts.index), "values": counts.tolist()}
 
-        lead_status = (intent.get("lead_status") or "All").title()
+        def _score_distribution(_df):
+            bands = pd.cut(
+                _df["numeric_lead_score"],
+                bins=[-1,5,10,15,20,100],
+                labels=["0-5","6-10","11-15","16-20","21+"]
+            )
+            vc = bands.value_counts().sort_index()
+            return {"kind":"bar","labels": list(vc.index.astype(str)), "values": vc.tolist()}
 
-        # 5) Apply status filter only
-        filtered = df.copy()
-        if lead_status in {"Converted", "Lost"}:
-            filtered = filtered[filtered["action_status"] == lead_status]
-        elif lead_status in {"Hot", "Warm", "Cold"}:
-            # Use the label column directly (your app already standardizes labels)
-            filtered = filtered[filtered["lead_score"].fillna("").str.lower() == lead_status.lower()]
-        # else "All": no extra filter
+        def _converted_lost_trend(_df):
+            _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce").dt.date
+            g = _df.groupby(["date","action_status"]).size().unstack(fill_value=0)
+            x = [d.isoformat() for d in g.index]
+            series = {}
+            if "Converted" in g.columns: series["Converted"] = g["Converted"].tolist()
+            if "Lost" in g.columns:      series["Lost"]      = g["Lost"].tolist()
+            if not series:
+                series["Leads"] = _df.groupby("date").size().reindex(g.index, fill_value=0).tolist()
+            return {"kind":"line","x": x, "series": series}
 
-        result_count = int(filtered.shape[0])
+        def _trend_for_status(_df, statuses):
+            _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce").dt.date
+            label_map = {"hot":"Hot","warm":"Warm","cold":"Cold"}
+            _df["__ls__"] = _df["lead_score"].str.lower()
+            g = _df.groupby("date").apply(lambda d: pd.Series({
+            lab: int((d["__ls__"]==s).sum()) for s,lab in [(k,label_map[k]) for k in statuses]
+            }))
+            g = g.sort_index().fillna(0)
+            x = [d.isoformat() for d in g.index]
+            series = {col: g[col].astype(int).tolist() for col in g.columns}
+            return {"kind":"line","x": x, "series": series}
 
-        # 6) Compose output message
-        s_date = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
-        e_date_disp = (datetime.strptime(end_date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%b %d, %Y")
-        label = f"{lead_status.lower()} leads" if lead_status != "All" else "total leads"
-        msg = f"📊 {label.capitalize()}: **{result_count}** (filtered from {s_date} to {e_date_disp})"
+        def _rank_leads(_df, top_n=20):
+        # Priority weights (explainable)
+            action_weight = {
+            "Call Customer (AI)": 100,
+            "Follow Up Required": 60,
+            "Test Drive Due": 50,
+            "Call Scheduled": 40,
+            }
+            now = pd.Timestamp.utcnow()
+            rows = []
+            for _, r in _df.iterrows():
+                action = r.get("action_status") or ""
+                base   = action_weight.get(action, 0)
+                score  = base + 3*int(r["numeric_lead_score"])
+                ts     = pd.to_datetime(r.get("booking_timestamp"), errors="coerce", utc=True)
+                days_since = 0
+                if ts is not None:
+                    try:
+                        days_since = max(0, (now - ts).days)
+                    except Exception:
+                        days_since = 0
+                score += max(0, 7 - days_since) * 2   # recency boost (max 14)
 
-        return {"result_message": msg}
+                rows.append({
+                    "Priority": int(score),
+                    "Lead": r.get("full_name"),
+                    "Vehicle": r.get("vehicle"),
+                    "Status": action,
+                    "LeadScore": int(r["numeric_lead_score"]),
+                    "Booked": str(ts) if ts is not None else "",
+                    "RequestID": r.get("request_id"),
+                    "Reason": "; ".join(
+                        [bit for bit in [
+                            ("explicit: call customer (AI)" if action=="Call Customer (AI)" else None),
+                            ("follow-up required" if action=="Follow Up Required" else None),
+                            ("recent lead" if days_since<=3 else None),
+                            ("high lead score" if int(r["numeric_lead_score"])>=15 else None),
+                            ("good lead score" if 10<=int(r["numeric_lead_score"])<15 else None),
+                        ] if bit]
+                ) or "—",
+            })
+            rank_df = pd.DataFrame(rows).sort_values(by="Priority", ascending=False).head(top_n)
+            payload = {"columns":["Lead","Vehicle","Status","LeadScore","Reason"], "rows": rank_df.to_dict(orient="records")}
+            return payload
 
-    except Exception as e:
+    # 5) Execute intent (all within current FILTERED VIEW)
+        s_label = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
+        e_label = datetime.strptime(end_date_str,   "%Y-%m-%d").strftime("%b %d, %Y")
+
+        if intent == "RANK":
+            payload = _rank_leads(df, top_n=20)
+            msg = f"☎️ Recommended call list (using current filters: {s_label} → {e_label})"
+            return {"result_type":"RANK", "result_message": msg, "payload": payload}
+
+        if intent == "CHART":
+    # Choose chart type by keywords
+            if any(k in q for k in ["distribution","histogram","score"]):
+                payload = _score_distribution(df)
+                msg = f"📊 Lead score distribution (using current filters: {s_label} → {e_label})"
+                return {"result_type":"CHART","result_message": msg, "payload": payload}
+            if ("convert" in q or "lost" in q) and any(k in q for k in ["trend","daily","chart","over time"]):
+                payload = _converted_lost_trend(df)
+                msg = f"📈 Conversions vs. losses trend (using current filters: {s_label} → {e_label})"
+                return {"result_type":"CHART","result_message": msg, "payload": payload}
+    # default chart: status breakdown
+            payload = _status_breakdown(df)
+            msg = f"📊 Leads by status (using current filters: {s_label} → {e_label})"
+            return {"result_type":"CHART","result_message": msg, "payload": payload}
+
+    # Fallback to basic COUNT (your earlier behavior), still filtered by dates
+        lead_status_map = {
+            "hot":"Hot","warm":"Warm","cold":"Cold",
+            "converted":"Converted","lost":"Lost","total":"All"
+        }
+    # detect a status word; default is All
+        selected = "All"
+        for k,v in lead_status_map.items():
+            if k in q:
+                selected = v; break
+
+        filtered_df = df.copy()
+        if selected in ["Converted","Lost"]:
+            filtered_df = filtered_df[filtered_df["action_status"] == selected]
+        elif selected in ["Hot","Warm","Cold"]:
+            filtered_df = filtered_df[filtered_df["lead_score"].str.lower() == selected.lower()]
+    # else: All
+
+        result_count = int(filtered_df.shape[0])
+        label = f"{selected.lower()} leads" if selected!="All" else "total leads"
+        msg = f"📊 {label.capitalize()}: **{result_count}** (using current filters: {s_label} → {e_label})"
+        return {"result_type":"COUNT","result_message": msg}
+          
+     except Exception as e:
         logging.error(f"Error processing analytics query: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Analytics error: {e}")
 
