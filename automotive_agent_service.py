@@ -682,67 +682,58 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             )
             vc = bands.value_counts().sort_index()
             return {"kind":"bar","labels": list(vc.index.astype(str)), "values": vc.tolist()}
-
-
+        
         def _converted_lost_trend(_df):
             _df = _df.copy()
             _df["ts"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce", utc=True)
-            _df["date"] = _df["ts"].dt.date
+            _df["date"] = _df["ts"].dt.normalize()  # midnight UTC (Timestamp index)
 
-    # daily counts first
-            daily = (
-                _df.groupby(["date", "action_status"])
+            # Daily pivot for Converted/Lost
+            daily_pivot = (
+                _df.pivot_table(
+                    index="date", columns="action_status",
+                    values="request_id", aggfunc="count"
+                )
+               .fillna(0)
+               .sort_index()
+            )
+
+            # Daily total leads (fallback if no Converted/Lost)
+            daily_total = (
+                _df.groupby("date")
                     .size()
-                    .unstack(fill_value=0)
                     .sort_index()
             )
 
-            # if period is long, aggregate weekly to reduce "zero lines"
-            # rule of thumb: more than ~21 distinct days ⇒ weekly
-            if len(daily.index) > 21:
-            # convert the index to Timestamp for weekly grouping
-                di = pd.to_datetime(daily.index)
-                week_start = di.to_period("W-MON").start_time  # ISO-like week starting Mon
-                daily.index = week_start
-                g = daily.groupby(daily.index).sum().sort_index()
-                x_index = g.index
+            # If the window is long, aggregate weekly (Monday start) to avoid sparse/flat lines
+            long_window = len(daily_pivot.index) > 21
+            if long_window:
+                pivot_res = daily_pivot.resample("W-MON").sum()
+                total_res = daily_total.resample("W-MON").sum()
             else:
-                g = daily
-                x_index = pd.to_datetime(g.index)
+                pivot_res = daily_pivot
+                total_res = daily_total
 
-    # build series
             series = {}
-            if "Converted" in g.columns:
-                series["Converted"] = g["Converted"].astype(int).tolist()
-            if "Lost" in g.columns:
-                series["Lost"] = g["Lost"].astype(int).tolist()
+            if "Converted" in pivot_res.columns:
+                series["Converted"] = pivot_res["Converted"].astype(int).tolist()
+            if "Lost" in pivot_res.columns:
+                series["Lost"] = pivot_res["Lost"].astype(int).tolist()
 
-    # if there are no Converted/Lost columns at all, fallback to total leads
+            # If no Converted/Lost at all → show total leads instead
             if not series:
-                total = _df.groupby("date").size()
-            if len(daily.index) > 21:
-                di_total = pd.to_datetime(total.index)
-                wk = di_total.to_period("W-MON").start_time
-                total = total.groupby(wk).sum().sort_index()
-                x_index = total.index
+                x_index = total_res.index
+                series["Leads"] = total_res.astype(int).tolist()
             else:
-                x_index = pd.to_datetime(total.index)
-            series["Leads"] = total.astype(int).tolist()
+                # Optionally drop rows where both Converted & Lost are zero (cleaner line)
+                nonzero = (pivot_res.get("Converted", 0) + pivot_res.get("Lost", 0)) > 0
+                if nonzero.any():
+                    pivot_res = pivot_res[nonzero]
+                x_index = pivot_res.index
 
-    # optionally drop rows where both series are zero (to avoid long flat line)
-    # keep at least one point to avoid empty plot
-            if set(series.keys()) == {"Converted", "Lost"}:
-                mask_nonzero = (g.get("Converted", 0) + g.get("Lost", 0)) > 0
-                if mask_nonzero.any():
-                    g = g[mask_nonzero]
-                    x_index = x_index[mask_nonzero]
-                    series["Converted"] = g.get("Converted", pd.Series(dtype=int)).astype(int).tolist()
-                    series["Lost"] = g.get("Lost", pd.Series(dtype=int)).astype(int).tolist()
-
-            x = [pd.Timestamp(t).date().isoformat() for t in x_index]
+            x = [ts.date().isoformat() for ts in pd.to_datetime(x_index)]
             return {"kind": "line", "x": x, "series": series}
-
-       
+      
         def _trend_for_status(_df, statuses):
             _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce").dt.date
             label_map = {"hot":"Hot","warm":"Warm","cold":"Cold"}
