@@ -651,9 +651,15 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
         def wants_rank(s: str) -> bool:
             return any(k in s for k in ["who should i call","whom should i call","call list","calllist","prioritize","rank"])
 
+     
         def wants_chart(s: str) -> bool:
-            return any(k in s for k in ["chart","trend","distribution","histogram","score distribution","daily","per day"])
-
+            chart_terms = [
+                "chart", "trend", "trends", "distribution", "histogram",
+                "score distribution", "daily", "per day", "over time",
+                "timeline", "time series", "time-series", "line"
+            ]
+            return any(t in s for t in chart_terms)
+ 
         intent = "COUNT"
         if wants_rank(q):
             intent = "RANK"
@@ -678,16 +684,27 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             return {"kind":"bar","labels": list(vc.index.astype(str)), "values": vc.tolist()}
 
         def _converted_lost_trend(_df):
-            _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce").dt.date
-            g = _df.groupby(["date","action_status"]).size().unstack(fill_value=0)
+            _df = _df.copy()
+            _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce", utc=True).dt.date
+            g = (
+            _df.groupby(["date", "action_status"])
+            .size()
+            .unstack(fill_value=0)
+            .sort_index()  # ensure chronological order
+            )
             x = [d.isoformat() for d in g.index]
             series = {}
-            if "Converted" in g.columns: series["Converted"] = g["Converted"].tolist()
-            if "Lost" in g.columns:      series["Lost"]      = g["Lost"].tolist()
+            if "Converted" in g.columns:
+                series["Converted"] = g["Converted"].astype(int).tolist()
+            if "Lost" in g.columns:
+                series["Lost"] = g["Lost"].astype(int).tolist()
             if not series:
-                series["Leads"] = _df.groupby("date").size().reindex(g.index, fill_value=0).tolist()
-            return {"kind":"line","x": x, "series": series}
+                # fallback: plot total leads per day if no Converted/Lost present
+                total_per_day = _df.groupby("date").size().reindex(g.index, fill_value=0).astype(int).tolist()
+                series["Leads"] = total_per_day
+            return {"kind": "line", "x": x, "series": series}
 
+        
         def _trend_for_status(_df, statuses):
             _df["date"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce").dt.date
             label_map = {"hot":"Hot","warm":"Warm","cold":"Cold"}
@@ -760,10 +777,16 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
                 payload = _score_distribution(df)
                 msg = f"📊 Lead score distribution (using current filters: {s_label} → {e_label})"
                 return {"result_type":"CHART","result_message": msg, "payload": payload}
-            if ("convert" in q or "lost" in q) and any(k in q for k in ["trend","daily","chart","over time"]):
+             # conversions/losses trend?
+            conv_terms  = ["convert", "converted", "conversion", "conversions"]
+            loss_terms  = ["lost", "loss", "losses"]
+            trend_terms = ["trend", "trends", "daily", "per day", "over time", "timeline", "time series", "time-series", "chart", "line"]
+
+            if (any(t in q for t in conv_terms + loss_terms)) and (any(t in q for t in trend_terms)):
                 payload = _converted_lost_trend(df)
                 msg = f"📈 Conversions vs. losses trend (using current filters: {s_label} → {e_label})"
-                return {"result_type":"CHART","result_message": msg, "payload": payload}
+                return {"result_type": "CHART", "result_message": msg, "payload": payload}
+    
     # default chart: status breakdown
             payload = _status_breakdown(df)
             msg = f"📊 Leads by status (using current filters: {s_label} → {e_label})"
