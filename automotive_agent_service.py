@@ -683,55 +683,60 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             vc = bands.value_counts().sort_index()
             return {"kind":"bar","labels": list(vc.index.astype(str)), "values": vc.tolist()}
         
-        def _converted_lost_trend(_df):
-            _df = _df.copy()
-            _df["ts"] = pd.to_datetime(_df["booking_timestamp"], errors="coerce", utc=True)
-            _df["date"] = _df["ts"].dt.normalize()  # midnight UTC (Timestamp index)
+        def _converted_lost_trend(_df: pd.DataFrame) -> dict:
+            """
+            Returns a consistent time-series payload for Streamlit.
+            - Uses DAILY frequency for short ranges (<= 21 days) and WEEKLY otherwise.
+            - Ensures all series have the same length and share the same index.
+            """
+            if _df.empty:
+                return {"kind": "line", "x": [], "series": {}}
 
-            # Daily pivot for Converted/Lost
-            daily_pivot = (
-                _df.pivot_table(
-                    index="date", columns="action_status",
-                    values="request_id", aggfunc="count"
-                )
-               .fillna(0)
-               .sort_index()
-            )
+    # Work entirely in a normalized daily timestamp column
+            ts = pd.to_datetime(_df["booking_timestamp"], errors="coerce", utc=True)
+            d  = _df.copy()
+            d["day"] = ts.dt.floor("D")               # DatetimeIndex @ 00:00 UTC
 
-            # Daily total leads (fallback if no Converted/Lost)
-            daily_total = (
-                _df.groupby("date")
+            # Choose frequency based on span (weekly looks better for longer ranges)
+            span_days = int((d["day"].max() - d["day"].min()).days) + 1
+            freq = "D" if span_days <= 21 else "W-MON"
+
+            # Build a complete date index for the chosen frequency
+            date_index = pd.date_range(start=d["day"].min(), end=d["day"].max(), freq=freq)
+
+            # Helper to make a series (aligned to date_index, filled with zeros)
+            def _series(mask: pd.Series) -> pd.Series:
+                if not mask.any():
+                    return pd.Series(0, index=date_index)
+                s = (
+                    d.loc[mask]
+                    .set_index("day")
+                    .resample(freq)
                     .size()
-                    .sort_index()
-            )
+                    .reindex(date_index, fill_value=0)
+                )
+                return s.astype(int)
 
-            # If the window is long, aggregate weekly (Monday start) to avoid sparse/flat lines
-            long_window = len(daily_pivot.index) > 21
-            if long_window:
-                pivot_res = daily_pivot.resample("W-MON").sum()
-                total_res = daily_total.resample("W-MON").sum()
+            conv = _series(d["action_status"] == "Converted")
+            lost = _series(d["action_status"] == "Lost")
+
+            # If neither Converted nor Lost is present, fall back to total leads
+            if conv.sum() == 0 and lost.sum() == 0:
+                total = (
+                    d.set_index("day")
+                    .resample(freq)
+                    .size()
+                    .reindex(date_index, fill_value=0)
+                    .astype(int)
+                )
+                series = {"Leads": total.tolist()}
             else:
-                pivot_res = daily_pivot
-                total_res = daily_total
+                series = {
+                    "Converted": conv.tolist(),
+                    "Lost":      lost.tolist(),
+               }
 
-            series = {}
-            if "Converted" in pivot_res.columns:
-                series["Converted"] = pivot_res["Converted"].astype(int).tolist()
-            if "Lost" in pivot_res.columns:
-                series["Lost"] = pivot_res["Lost"].astype(int).tolist()
-
-            # If no Converted/Lost at all → show total leads instead
-            if not series:
-                x_index = total_res.index
-                series["Leads"] = total_res.astype(int).tolist()
-            else:
-                # Optionally drop rows where both Converted & Lost are zero (cleaner line)
-                nonzero = (pivot_res.get("Converted", 0) + pivot_res.get("Lost", 0)) > 0
-                if nonzero.any():
-                    pivot_res = pivot_res[nonzero]
-                x_index = pivot_res.index
-
-            x = [ts.date().isoformat() for ts in pd.to_datetime(x_index)]
+            x = [ts.isoformat() for ts in date_index]   # Streamlit will parse these fine
             return {"kind": "line", "x": x, "series": series}
       
         def _trend_for_status(_df, statuses):
