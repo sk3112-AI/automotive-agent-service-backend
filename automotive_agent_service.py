@@ -792,7 +792,7 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
         msg = f"📊 {label.capitalize()}: **{result_count}** (using current filters: {s_label} → {e_label})"
         return {"result_type":"COUNT","result_message": msg}
           
-     except Exception as e:
+    except Exception as e:#fixed inendation
         logging.error(f"Error processing analytics query: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Analytics error: {e}")
 
