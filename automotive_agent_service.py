@@ -658,9 +658,9 @@ def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
 import os, logging
 
 logging.info(
-    "Runtime check: raw USE_LLM_REASONS=%r | compiled=%s | key_set=%s",
-    os.getenv("USE_LLM_REASONS"),
-    USE_LLM_REASONS,
+    "Runtime check: raw LLM_REASONS_ENABLED=%r | compiled=%s | key_set=%s",
+    os.getenv("LLM_REASONS_ENABLED"),
+    LLM_REASONS_ENABLED,
     bool(OPENAI_API_KEY and OPENAI_API_KEY.strip()),
 )
 
