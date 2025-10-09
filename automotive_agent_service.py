@@ -587,6 +587,103 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
             "Error generating offer suggestion. Please try again.",
             "Error generating offer suggestion. Please try again."
         )
+# ---- Helper: normalize action statuses (case/spacing tolerant)
+def _norm_status(s: str) -> str:
+    if not s:
+        return ""
+    s = s.strip().lower()
+    # unify common variants
+    s = s.replace("the ", "")  # "Call the customer (AI)" -> "call customer (ai)"
+    return s
+
+# ---- Helper: score sales notes when Follow Up Required
+def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
+    """
+    Returns (score_delta, reason_bits) for Follow Up Required leads.
+    We reward concrete concerns and time-bound callbacks.
+    """
+    if not notes:
+        return 0, []
+
+    n = notes.lower()
+    bits = []
+    score = 0
+
+    # high-priority signals
+    if any(k in n for k in ["call back", "callback", "call tomorrow", "call monday", "call next week", "reach me", "available after"]):
+        score += 12
+        bits.append("requested callback")
+    if any(k in n for k in ["urgent", "asap", "immediate", "priority"]):
+        score += 10
+        bits.append("urgent tone")
+
+    # concrete buying concerns (price/financing/availability/etc.)
+    if any(k in n for k in ["price", "budget", "emi", "loan", "finance", "financing", "insurance"]):
+        score += 9
+        bits.append("financing/price concern")
+    if any(k in n for k in ["delivery", "wait time", "availability"]):
+        score += 6
+        bits.append("delivery/availability concern")
+    if any(k in n for k in ["range", "charging", "mileage", "battery"]):
+        score += 6
+        bits.append("range/efficiency concern")
+    if any(k in n for k in ["test drive", "td", "schedule drive"]):
+        score += 8
+        bits.append("test drive interest")
+
+    # deprioritizers
+    if any(k in n for k in ["not interested", "no longer interested", "spam", "wrong number"]):
+        score -= 20
+        bits.append("low intent")
+
+    return score, bits
+
+# ---- Optional: batch LLM "reason" generator (fast, guarded)
+USE_LLM_REASONS = os.getenv("ANALYTICS_USE_LLM_REASONS", "false").lower() == "true"
+
+def _llm_reasons(rows: list[dict]) -> list[str]:
+    """
+    rows: list of dicts with keys: Lead, Status, LeadScore, Reason, SalesNotes, AgeDays
+    Returns list of strings, same length. Falls back to existing Reason if LLM fails.
+    """
+    try:
+        if not USE_LLM_REASONS or not rows:
+            return [r.get("Reason", "") for r in rows]
+
+        # Build a compact prompt (single call, batched)
+        lines = []
+        for i, r in enumerate(rows):
+            ln = (
+                f"{i}|name={r.get('Lead','?')}; "
+                f"status={r.get('Status','')}; "
+                f"score={r.get('LeadScore',0)}; "
+                f"age_days={r.get('AgeDays',0)}; "
+                f"notes={ (r.get('SalesNotes') or '')[:160] }"
+            )
+            lines.append(ln)
+
+        prompt = (
+            "Write a concise, helpful reason (<= 12 words) for why the salesperson should call each lead now. "
+            "Be specific and use the context. Return a JSON array of strings in the same order.\n\n"
+            + "\n".join(lines)
+        )
+
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+            timeout=10,
+        )
+        obj = json.loads(resp.choices[0].message.content)
+        arr = obj.get("reasons") or obj.get("result") or obj.get("data")
+        if isinstance(arr, list) and len(arr) == len(rows):
+            return [str(x)[:140] for x in arr]
+    except Exception:
+        pass
+    # fallback
+    return [r.get("Reason", "") for r in rows]
 
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
@@ -751,57 +848,122 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             series = {col: g[col].astype(int).tolist() for col in g.columns}
             return {"kind":"line","x": x, "series": series}
 
-        def _rank_leads(_df, top_n=20):
-        # Priority weights (explainable)
-            action_weight = {
-            "Call Customer (AI)": 100,
-            "Follow Up Required": 60,
-            "Test Drive Due": 50,
-            "Call Scheduled": 40,
-            }
-            now = pd.Timestamp.utcnow()
-            rows = []
-            for _, r in _df.iterrows():
-                action = r.get("action_status") or ""
-                base   = action_weight.get(action, 0)
-                score  = base + 3*int(r["numeric_lead_score"])
-                ts     = pd.to_datetime(r.get("booking_timestamp"), errors="coerce", utc=True)
-                days_since = 0
-                if ts is not None:
-                    try:
-                        days_since = max(0, (now - ts).days)
-                    except Exception:
-                        days_since = 0
-                score += max(0, 7 - days_since) * 2   # recency boost (max 14)
+        def _rank_leads(_df: pd.DataFrame, top_n: int = 10) -> dict:
+            """
+            Build a Top-N call list with explicit priority rules:
+            1) 'Call Customer (AI)' first
+            2) 'Escalation Initiated' next
+            3) Then score by lead score, recency, and Follow-Up notes
+            Returns payload with columns + rows for the dashboard.
+            """
+        if _df.empty:
+            return {"columns": ["Lead","Vehicle","Status","LeadScore","Reason"], "rows": []}
 
-                rows.append({
-                    "Priority": int(score),
-                    "Lead": r.get("full_name"),
-                    "Vehicle": r.get("vehicle"),
-                    "Status": action,
-                    "LeadScore": int(r["numeric_lead_score"]),
-                    "Booked": str(ts) if ts is not None else "",
-                    "RequestID": r.get("request_id"),
-                    "Reason": "; ".join(
-                        [bit for bit in [
-                            ("explicit: call customer (AI)" if action=="Call Customer (AI)" else None),
-                            ("follow-up required" if action=="Follow Up Required" else None),
-                            ("recent lead" if days_since<=3 else None),
-                            ("high lead score" if int(r["numeric_lead_score"])>=15 else None),
-                            ("good lead score" if 10<=int(r["numeric_lead_score"])<15 else None),
-                        ] if bit]
-                ) or "—",
+        # Strong status bonus so ordering is obvious
+        status_bonus = {
+            "call customer (ai)"   : 1000,
+            "escalation initiated" : 800,
+            "call scheduled"       : 350,
+            "follow up required"   : 320,
+            "test drive due"       : 260,
+            "offer sent (ai)"      : 190,
+            "engaged - email"      : 170,
+            "personalized ad sent" : 160,
+            "converted"            : -300,
+            "lost"                 : -500,
+        }
+
+        now = pd.Timestamp.utcnow()
+        rows = []
+        for _, r in _df.iterrows():
+        # Skip rows with no name or id to avoid weird blanks at the top
+            if not r.get("full_name") or not r.get("request_id"):
+                continue
+
+            stxt = _norm_status(r.get("action_status"))
+            base = status_bonus.get(stxt, 0)
+
+            # Lead score + recency
+            ls = int(pd.to_numeric(r.get("numeric_lead_score"), errors="coerce") or 0)
+            score = base + 5 * ls
+
+            ts = pd.to_datetime(r.get("booking_timestamp"), errors="coerce", utc=True)
+            age_days = 0
+            if isinstance(ts, pd.Timestamp):
+                try:
+                    age_days = max(0, (now - ts).days)
+                except Exception:
+                    age_days = 0
+
+            # recency boost (max ~16 points in first few days)
+            score += max(0, 8 - min(age_days, 8)) * 2
+
+        # Sales notes weighting only when Follow Up Required
+            notes_bits = []
+            if stxt == "follow up required":
+                delta, bits = _score_from_sales_notes(r.get("sales_notes") or "")
+                score += delta
+                notes_bits.extend(bits)
+
+        # Build a default reason (deterministic)
+            reason_bits = []
+            if base >= 1000:
+                reason_bits.append("explicit agent instruction")
+            elif base >= 800:
+                reason_bits.append("escalation flagged")
+            if ls >= 15:
+                reason_bits.append("high lead score")
+            elif ls >= 10:
+                reason_bits.append("good lead score")
+            if age_days <= 3:
+                reason_bits.append("recent lead")
+            if notes_bits:
+                reason_bits.append("notes: " + ", ".join(notes_bits))
+
+            reason_text = " • ".join(reason_bits) or "—"
+
+            rows.append({
+                "Priority"   : int(score),
+                "Lead"       : r.get("full_name"),
+                "Vehicle"    : r.get("vehicle"),
+                "Status"     : r.get("action_status"),
+                "LeadScore"  : ls,
+                "SalesNotes" : r.get("sales_notes") or "",
+                "AgeDays"    : age_days,
+                "RequestID"  : r.get("request_id"),
+                "Reason"     : reason_text,
             })
-            rank_df = pd.DataFrame(rows).sort_values(by="Priority", ascending=False).head(top_n)
-            payload = {"columns":["Lead","Vehicle","Status","LeadScore","Reason"], "rows": rank_df.to_dict(orient="records")}
-            return payload
+
+        if not rows:
+        return {"columns":["Lead","Vehicle","Status","LeadScore","Reason"], "rows": []}
+
+    # Sort by (status priority first), then by Priority score
+        def _status_rank(s):
+            return -status_bonus.get(_norm_status(s), 0)  # negative so higher bonus -> smaller rank
+
+        rows = sorted(rows, key=lambda x: (_status_rank(x["Status"]), -x["Priority"]))
+
+        # Keep Top N
+        rows = rows[: max(1, top_n)]
+
+        # Optional: replace reason with a short LLM line if enabled
+        rows_with_llm = _llm_reasons(rows)
+        for i, txt in enumerate(rows_with_llm):
+            if txt and isinstance(txt, str):
+                rows[i]["Reason"] = txt
+
+        payload = {
+            "columns": ["Lead","Vehicle","Status","LeadScore","Reason"],
+            "rows": [{k:v for k,v in r.items() if k in ["Lead","Vehicle","Status","LeadScore","Reason"]} for r in rows],
+        }
+        return payload
 
     # 5) Execute intent (all within current FILTERED VIEW)
         s_label = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
         e_label = datetime.strptime(end_date_str,   "%Y-%m-%d").strftime("%b %d, %Y")
 
         if intent == "RANK":
-            payload = _rank_leads(df, top_n=20)
+            payload = _rank_leads(df, top_n=10)
             msg = f"☎️ Recommended call list (using current filters: {s_label} → {e_label})"
             return {"result_type":"RANK", "result_message": msg, "payload": payload}
 
