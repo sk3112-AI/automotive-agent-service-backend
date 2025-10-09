@@ -848,7 +848,8 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             series = {col: g[col].astype(int).tolist() for col in g.columns}
             return {"kind":"line","x": x, "series": series}
 
-        def _rank_leads(_df: pd.DataFrame, top_n: int = 10) -> dict:
+        
+        def _rank_leads(_df: pd.DataFrame, top_n: int = 10, _status_bonus: dict | None = None) -> dict:
             """
             Build a Top-N call list with explicit priority rules:
             1) 'Call Customer (AI)' first
@@ -860,7 +861,8 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
                 return {"columns": ["Lead", "Vehicle", "Status", "LeadScore", "Reason"], "rows": []}
 
             # Strong status bonus so ordering is obvious
-                status_bonus = {
+            if _status_bonus is None:
+                _status_bonus = {
                     "call customer (ai)": 1000,
                     "escalation initiated": 800,
                     "call scheduled": 350,
@@ -881,8 +883,7 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
                     continue
 
                 stxt = _norm_status(r.get("action_status"))
-                base = status_bonus.get(stxt, 0)
-
+                base = _status_bonus.get(stxt, 0)
                 # Lead score + recency
                 ls = int(pd.to_numeric(r.get("numeric_lead_score"), errors="coerce") or 0)
                 score = base + 5 * ls
@@ -938,8 +939,8 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
                 return {"columns": ["Lead", "Vehicle", "Status", "LeadScore", "Reason"], "rows": []}
 
             # Sort by (status priority first), then by Priority score
-            def _status_rank(s: str) -> int:
-                return -status_bonus.get(_norm_status(s), 0)  # negative so higher bonus -> smaller rank
+            def _status_rank(s):
+                return -_status_bonus.get(_norm_status(s), 0)
 
             rows = sorted(rows, key=lambda x: (_status_rank(x["Status"]), -x["Priority"]))
 
