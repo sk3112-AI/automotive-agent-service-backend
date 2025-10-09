@@ -640,50 +640,40 @@ def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
 
 # ---- Optional: batch LLM "reason" generator (fast, guarded)
 USE_LLM_REASONS = os.getenv("ANALYTICS_USE_LLM_REASONS", "false").lower() == "true"
-
 def _llm_reasons(rows: list[dict]) -> list[str]:
-    """
-    rows: list of dicts with keys: Lead, Status, LeadScore, Reason, SalesNotes, AgeDays
-    Returns list of strings, same length. Falls back to existing Reason if LLM fails.
-    """
+    # If disabled or no key, return blanks (fallback to deterministic reasons)
+    if not USE_LLM_REASONS or openai_client is None or not rows:
+        return [""] * len(rows)
+
     try:
-        if not USE_LLM_REASONS or not rows:
-            return [r.get("Reason", "") for r in rows]
-
-        # Build a compact prompt (single call, batched)
-        lines = []
-        for i, r in enumerate(rows):
-            ln = (
-                f"{i}|name={r.get('Lead','?')}; "
-                f"status={r.get('Status','')}; "
-                f"score={r.get('LeadScore',0)}; "
-                f"age_days={r.get('AgeDays',0)}; "
-                f"notes={ (r.get('SalesNotes') or '')[:160] }"
+        # keep costs tiny: one short phrase per row
+        out = []
+        for r in rows:
+            lead = (r.get("Lead") or "").strip()
+            status = (r.get("Status") or "").strip()
+            ls = r.get("LeadScore", 0)
+            notes = (r.get("SalesNotes") or "").strip()
+            prompt = (
+                "Write a very short reason (max 12 words) for why this lead should be called next.\n"
+                f"Lead: {lead}\nStatus: {status}\nLeadScore: {ls}\nSalesNotes: {notes}\n"
+                "Avoid personal data; no punctuation at end if possible."
             )
-            lines.append(ln)
-
-        prompt = (
-            "Write a concise, helpful reason (<= 12 words) for why the salesperson should call each lead now. "
-            "Be specific and use the context. Return a JSON array of strings in the same order.\n\n"
-            + "\n".join(lines)
-        )
-
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=200,
-            response_format={"type": "json_object"},
-            timeout=10,
-        )
-        obj = json.loads(resp.choices[0].message.content)
-        arr = obj.get("reasons") or obj.get("result") or obj.get("data")
-        if isinstance(arr, list) and len(arr) == len(rows):
-            return [str(x)[:140] for x in arr]
-    except Exception:
-        pass
-    # fallback
-    return [r.get("Reason", "") for r in rows]
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",           # small, fast, cheap
+                temperature=0.2,
+                max_tokens=32,
+                messages=[
+                    {"role": "system", "content": "You are concise and specific."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            out.append(text or "")
+        return out
+    except Exception as ex:
+        import logging
+        logging.error(f"LLM reasons failed: {ex}", exc_info=True)
+        return [""] * len(rows)  # fall back
 
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
