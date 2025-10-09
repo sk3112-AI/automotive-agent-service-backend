@@ -85,7 +85,21 @@ logging.info(
     "LLM reasons enabled? %s | OPENAI_API_KEY set? %s",
     USE_LLM_REASONS, bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
 )
-
+# NEW: construct a single client once at import time
+openai_client = None
+try:
+    if USE_LLM_REASONS and OPENAI_API_KEY and OPENAI_API_KEY.strip():
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=OPENAI_API_KEY.strip())
+        logging.info("OpenAI client constructed for LLM reasons.")
+    else:
+        logging.info(
+            "Skipping OpenAI client construction: USE_LLM_REASONS=%s, key_present=%s",
+            USE_LLM_REASONS, bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
+        )
+except Exception as e:
+    logging.error("Failed to init OpenAI client: %s", e)
+    openai_client = None
 # Who gets the reminder
 SALES_TEAM_EMAIL = "karthik.sundararaju@gmail.com"
 
@@ -647,55 +661,37 @@ def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
 
 # ---- Optional: batch LLM "reason" generator (fast, guarded)
 USE_LLM_REASONS = os.getenv("ANALYTICS_USE_LLM_REASONS", "false").lower() == "true"
-def _llm_reasons(rows: list[dict]) -> list[str | None]:
-    """
-    Returns a list of short, one-line 'Reason' strings (or None) aligned to 'rows'.
-    Falls back silently on any error.
-    """
-    try:
-        if not USE_LLM_REASONS or openai_client is None:
-            logging.info("LLM reasons disabled or client missing.")
-            return [None] * len(rows)
-
-        # Build a compact bullet list for the model
-        bullets = []
-        for r in rows:
-            bullets.append(
-                f"- Lead: {r.get('Lead','')} | Status: {r.get('Status','')} | "
-                f"LeadScore: {r.get('LeadScore',0)} | Notes: {(r.get('SalesNotes') or '')[:200]}"
-            )
-        user_text = (
-            "Turn each line into ONE short sales reason (max 12 words), "
-            "be concise and human, no IDs or punctuation clutter. "
-            "Return one line per input, same order.\n\n" + "\n".join(bullets)
+def _llm_reasons(rows: list[str]) -> list[str | None]:
+    # Must see both the toggle and a constructed client
+    if not (USE_LLM_REASONS and openai_client):
+        logging.info(
+            "LLM reasons disabled or client missing: USE_LLM_REASONS=%s, client=%s, key_set=%s",
+            USE_LLM_REASONS, bool(openai_client), bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
         )
-
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o-mini",            # keep this model; works well for short text
-            temperature=0.2,
-            max_tokens=300,
-            messages=[
-                {"role": "system",
-                 "content": "You are a sales assistant. Produce crisp, helpful, one-line reasons."},
-                {"role": "user", "content": user_text},
-            ],
-        )
-
-        reply = (completion.choices[0].message.content or "").strip()
-        # Split into lines and clean bullets
-        lines = [ln.strip().lstrip("-• ").strip() for ln in reply.splitlines() if ln.strip()]
-
-        # Align output length with input length
-        out: list[str | None] = []
-        for i in range(len(rows)):
-            out.append(lines[i] if i < len(lines) and lines[i] else None)
-
-        logging.info("LLM reasons produced %d/%d lines.", sum(1 for x in out if x), len(rows))
-        return out
-
-    except Exception as e:
-        logging.warning("LLM reasons failed: %s", e, exc_info=True)
         return [None] * len(rows)
+
+    reasons: list[str | None] = []
+    for r in rows:
+        # r is a dict with keys Lead, Status, LeadScore, SalesNotes, AgeDays...
+        brief = f"{r.get('Lead','')}; status={r.get('Status','')}; score={r.get('LeadScore',0)}; age_days={r.get('AgeDays',0)}; notes={ (r.get('SalesNotes') or '')[:160] }"
+        try:
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",           # or "gpt-3.5-turbo" if you prefer
+                temperature=0.2,
+                max_tokens=24,
+                messages=[
+                    {"role": "system", "content": "Return a single short reason (max ~10 words) why this lead is priority to call. No punctuation heavy lines."},
+                    {"role": "user", "content": brief}
+                ],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            reasons.append(text if text else None)
+        except Exception as e:
+            logging.warning("LLM reason failed for %s: %s", r.get("Lead"), e)
+            reasons.append(None)
+
+    logging.info("LLM reasons produced %d/%d lines.", sum(1 for x in reasons if x), len(reasons))
+    return reasons
 
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
