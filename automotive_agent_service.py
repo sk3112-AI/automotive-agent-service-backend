@@ -935,7 +935,7 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             })
 
         if not rows:
-        return {"columns":["Lead","Vehicle","Status","LeadScore","Reason"], "rows": []}
+            return {"columns":["Lead","Vehicle","Status","LeadScore","Reason"], "rows": []}#inendation 
 
     # Sort by (status priority first), then by Priority score
         def _status_rank(s):
