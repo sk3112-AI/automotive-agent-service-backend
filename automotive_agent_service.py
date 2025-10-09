@@ -79,27 +79,23 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # --- LLM reasons toggles ---
-USE_LLM_REASONS = os.getenv("USE_LLM_REASONS", "false").strip().lower() == "true"
-
-logging.info(
-    "LLM reasons enabled? %s | OPENAI_API_KEY set? %s",
-    USE_LLM_REASONS, bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
-)
-# NEW: construct a single client once at import time
+LLM_REASONS_ENABLED = os.getenv("USE_LLM_REASONS", "false").strip().lower() == "true"
 openai_client = None
-try:
-    if USE_LLM_REASONS and OPENAI_API_KEY and OPENAI_API_KEY.strip():
+if LLM_REASONS_ENABLED and OPENAI_API_KEY and OPENAI_API_KEY.strip():
+    try:
         from openai import OpenAI
         openai_client = OpenAI(api_key=OPENAI_API_KEY.strip())
         logging.info("OpenAI client constructed for LLM reasons.")
-    else:
-        logging.info(
-            "Skipping OpenAI client construction: USE_LLM_REASONS=%s, key_present=%s",
-            USE_LLM_REASONS, bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
-        )
-except Exception as e:
-    logging.error("Failed to init OpenAI client: %s", e)
-    openai_client = None
+    except Exception as e:
+        logging.warning("Failed to construct OpenAI client for reasons: %s", e)
+        openai_client = None
+
+logging.info(
+    "LLM reasons enabled? %s | OPENAI_API_KEY set? %s",
+    LLM_REASONS_ENABLED,
+    bool(OPENAI_API_KEY and OPENAI_API_KEY.strip()),
+)
+
 # Who gets the reminder
 SALES_TEAM_EMAIL = "karthik.sundararaju@gmail.com"
 
@@ -669,13 +665,21 @@ logging.info(
 )
 
 # ---- Optional: batch LLM "reason" generator (fast, guarded)
-USE_LLM_REASONS = os.getenv("ANALYTICS_USE_LLM_REASONS", "false").lower() == "true"
+LLM_REASONS_ENABLED = (
+    os.getenv("USE_LLM_REASONS") 
+    or os.getenv("ANALYTICS_USE_LLM_REASONS") 
+    or "false"
+).strip().lower() == "true"
+
 def _llm_reasons(rows: list[str]) -> list[str | None]:
     # Must see both the toggle and a constructed client
-    if not (USE_LLM_REASONS and openai_client):
+    global LLM_REASONS_ENABLED, openai_client, OPENAI_API_KEY
+    if not LLM_REASONS_ENABLED or openai_client is None or not (OPENAI_API_KEY and OPENAI_API_KEY.strip()):
         logging.info(
-            "LLM reasons disabled or client missing: USE_LLM_REASONS=%s, client=%s, key_set=%s",
-            USE_LLM_REASONS, bool(openai_client), bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
+            "LLM reasons disabled or client missing: enabled=%s, client=%s, key_set=%s",
+            LLM_REASONS_ENABLED,
+            bool(openai_client),
+            bool(OPENAI_API_KEY and OPENAI_API_KEY.strip()),
         )
         return [None] * len(rows)
 
