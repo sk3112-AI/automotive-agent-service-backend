@@ -78,6 +78,8 @@ AOE_VEHICLE_IMAGES = {
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# --- LLM reasons toggles ---
+USE_LLM_REASONS = os.getenv("USE_LLM_REASONS", "false").strip().lower() == "true"
 
 # Who gets the reminder
 SALES_TEAM_EMAIL = "karthik.sundararaju@gmail.com"
