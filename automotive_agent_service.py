@@ -81,6 +81,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # --- LLM reasons toggles ---
 USE_LLM_REASONS = os.getenv("USE_LLM_REASONS", "false").strip().lower() == "true"
 
+logging.info(
+    "LLM reasons enabled? %s | OPENAI_API_KEY set? %s",
+    USE_LLM_REASONS, bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
+)
+
 # Who gets the reminder
 SALES_TEAM_EMAIL = "karthik.sundararaju@gmail.com"
 
@@ -642,40 +647,55 @@ def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
 
 # ---- Optional: batch LLM "reason" generator (fast, guarded)
 USE_LLM_REASONS = os.getenv("ANALYTICS_USE_LLM_REASONS", "false").lower() == "true"
-def _llm_reasons(rows: list[dict]) -> list[str]:
-    # If disabled or no key, return blanks (fallback to deterministic reasons)
-    if not USE_LLM_REASONS or openai_client is None or not rows:
-        return [""] * len(rows)
-
+def _llm_reasons(rows: list[dict]) -> list[str | None]:
+    """
+    Returns a list of short, one-line 'Reason' strings (or None) aligned to 'rows'.
+    Falls back silently on any error.
+    """
     try:
-        # keep costs tiny: one short phrase per row
-        out = []
+        if not USE_LLM_REASONS or openai_client is None:
+            logging.info("LLM reasons disabled or client missing.")
+            return [None] * len(rows)
+
+        # Build a compact bullet list for the model
+        bullets = []
         for r in rows:
-            lead = (r.get("Lead") or "").strip()
-            status = (r.get("Status") or "").strip()
-            ls = r.get("LeadScore", 0)
-            notes = (r.get("SalesNotes") or "").strip()
-            prompt = (
-                "Write a very short reason (max 12 words) for why this lead should be called next.\n"
-                f"Lead: {lead}\nStatus: {status}\nLeadScore: {ls}\nSalesNotes: {notes}\n"
-                "Avoid personal data; no punctuation at end if possible."
+            bullets.append(
+                f"- Lead: {r.get('Lead','')} | Status: {r.get('Status','')} | "
+                f"LeadScore: {r.get('LeadScore',0)} | Notes: {(r.get('SalesNotes') or '')[:200]}"
             )
-            resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",           # small, fast, cheap
-                temperature=0.2,
-                max_tokens=32,
-                messages=[
-                    {"role": "system", "content": "You are concise and specific."},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            text = (resp.choices[0].message.content or "").strip()
-            out.append(text or "")
+        user_text = (
+            "Turn each line into ONE short sales reason (max 12 words), "
+            "be concise and human, no IDs or punctuation clutter. "
+            "Return one line per input, same order.\n\n" + "\n".join(bullets)
+        )
+
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",            # keep this model; works well for short text
+            temperature=0.2,
+            max_tokens=300,
+            messages=[
+                {"role": "system",
+                 "content": "You are a sales assistant. Produce crisp, helpful, one-line reasons."},
+                {"role": "user", "content": user_text},
+            ],
+        )
+
+        reply = (completion.choices[0].message.content or "").strip()
+        # Split into lines and clean bullets
+        lines = [ln.strip().lstrip("-• ").strip() for ln in reply.splitlines() if ln.strip()]
+
+        # Align output length with input length
+        out: list[str | None] = []
+        for i in range(len(rows)):
+            out.append(lines[i] if i < len(lines) and lines[i] else None)
+
+        logging.info("LLM reasons produced %d/%d lines.", sum(1 for x in out if x), len(rows))
         return out
-    except Exception as ex:
-        import logging
-        logging.error(f"LLM reasons failed: {ex}", exc_info=True)
-        return [""] * len(rows)  # fall back
+
+    except Exception as e:
+        logging.warning("LLM reasons failed: %s", e, exc_info=True)
+        return [None] * len(rows)
 
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
