@@ -659,6 +659,15 @@ def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
 
     return score, bits
 
+import os, logging
+
+logging.info(
+    "Runtime check: raw USE_LLM_REASONS=%r | compiled=%s | key_set=%s",
+    os.getenv("USE_LLM_REASONS"),
+    USE_LLM_REASONS,
+    bool(OPENAI_API_KEY and OPENAI_API_KEY.strip()),
+)
+
 # ---- Optional: batch LLM "reason" generator (fast, guarded)
 USE_LLM_REASONS = os.getenv("ANALYTICS_USE_LLM_REASONS", "false").lower() == "true"
 def _llm_reasons(rows: list[str]) -> list[str | None]:
