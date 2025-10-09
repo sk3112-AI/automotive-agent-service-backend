@@ -856,109 +856,109 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
             3) Then score by lead score, recency, and Follow-Up notes
             Returns payload with columns + rows for the dashboard.
             """
-        if _df.empty:
-            return {"columns": ["Lead","Vehicle","Status","LeadScore","Reason"], "rows": []}
+            if _df.empty:
+                return {"columns": ["Lead", "Vehicle", "Status", "LeadScore", "Reason"], "rows": []}
 
-        # Strong status bonus so ordering is obvious
-        status_bonus = {
-            "call customer (ai)"   : 1000,
-            "escalation initiated" : 800,
-            "call scheduled"       : 350,
-            "follow up required"   : 320,
-            "test drive due"       : 260,
-            "offer sent (ai)"      : 190,
-            "engaged - email"      : 170,
-            "personalized ad sent" : 160,
-            "converted"            : -300,
-            "lost"                 : -500,
-        }
+            # Strong status bonus so ordering is obvious
+                status_bonus = {
+                    "call customer (ai)": 1000,
+                    "escalation initiated": 800,
+                    "call scheduled": 350,
+                    "follow up required": 320,
+                    "test drive due": 260,
+                    "offer sent (ai)": 190,
+                    "engaged - email": 170,
+                    "personalized ad sent": 160,
+                    "converted": -300,
+                    "lost": -500,
+                }
 
-        now = pd.Timestamp.utcnow()
-        rows = []
-        for _, r in _df.iterrows():
-        # Skip rows with no name or id to avoid weird blanks at the top
-            if not r.get("full_name") or not r.get("request_id"):
-                continue
+            now = pd.Timestamp.utcnow()
+            rows = []
+            for _, r in _df.iterrows():
+            # Skip rows with no name or id to avoid weird blanks at the top
+                if not r.get("full_name") or not r.get("request_id"):
+                    continue
 
-            stxt = _norm_status(r.get("action_status"))
-            base = status_bonus.get(stxt, 0)
+                stxt = _norm_status(r.get("action_status"))
+                base = status_bonus.get(stxt, 0)
 
-            # Lead score + recency
-            ls = int(pd.to_numeric(r.get("numeric_lead_score"), errors="coerce") or 0)
-            score = base + 5 * ls
+                # Lead score + recency
+                ls = int(pd.to_numeric(r.get("numeric_lead_score"), errors="coerce") or 0)
+                score = base + 5 * ls
 
-            ts = pd.to_datetime(r.get("booking_timestamp"), errors="coerce", utc=True)
-            age_days = 0
-            if isinstance(ts, pd.Timestamp):
-                try:
-                    age_days = max(0, (now - ts).days)
-                except Exception:
-                    age_days = 0
+                ts = pd.to_datetime(r.get("booking_timestamp"), errors="coerce", utc=True)
+                age_days = 0
+                if isinstance(ts, pd.Timestamp):
+                    try:
+                        age_days = max(0, (now - ts).days)
+                    except Exception:
+                        age_days = 0
 
-            # recency boost (max ~16 points in first few days)
-            score += max(0, 8 - min(age_days, 8)) * 2
+                # recency boost (max ~16 points in first few days)
+                score += max(0, 8 - min(age_days, 8)) * 2
 
-        # Sales notes weighting only when Follow Up Required
-            notes_bits = []
-            if stxt == "follow up required":
-                delta, bits = _score_from_sales_notes(r.get("sales_notes") or "")
-                score += delta
-                notes_bits.extend(bits)
+                # Sales notes weighting only when Follow Up Required
+                notes_bits = []
+                if stxt == "follow up required":
+                    delta, bits = _score_from_sales_notes(r.get("sales_notes") or "")
+                    score += delta
+                    notes_bits.extend(bits)
 
-        # Build a default reason (deterministic)
-            reason_bits = []
-            if base >= 1000:
-                reason_bits.append("explicit agent instruction")
-            elif base >= 800:
-                reason_bits.append("escalation flagged")
-            if ls >= 15:
-                reason_bits.append("high lead score")
-            elif ls >= 10:
-                reason_bits.append("good lead score")
-            if age_days <= 3:
-                reason_bits.append("recent lead")
-            if notes_bits:
-                reason_bits.append("notes: " + ", ".join(notes_bits))
+                # Build a default reason (deterministic)
+                reason_bits = []
+                if base >= 1000:
+                    reason_bits.append("explicit agent instruction")
+                elif base >= 800:
+                    reason_bits.append("escalation flagged")
+                if ls >= 15:
+                    reason_bits.append("high lead score")
+                elif ls >= 10:
+                    reason_bits.append("good lead score")
+                if age_days <= 3:
+                    reason_bits.append("recent lead")
+                if notes_bits:
+                    reason_bits.append("notes: " + ", ".join(notes_bits))
 
-            reason_text = " • ".join(reason_bits) or "—"
+                reason_text = " • ".join(reason_bits) or "—"
 
-            rows.append({
-                "Priority"   : int(score),
-                "Lead"       : r.get("full_name"),
-                "Vehicle"    : r.get("vehicle"),
-                "Status"     : r.get("action_status"),
-                "LeadScore"  : ls,
-                "SalesNotes" : r.get("sales_notes") or "",
-                "AgeDays"    : age_days,
-                "RequestID"  : r.get("request_id"),
-                "Reason"     : reason_text,
-            })
+                rows.append({
+                    "Priority": int(score),
+                    "Lead": r.get("full_name"),
+                    "Vehicle": r.get("vehicle"),
+                    "Status": r.get("action_status"),
+                    "LeadScore": ls,
+                    "SalesNotes": r.get("sales_notes") or "",
+                    "AgeDays": age_days,
+                    "RequestID": r.get("request_id"),
+                    "Reason": reason_text,
+                })
 
-        if not rows:
-            return {"columns":["Lead","Vehicle","Status","LeadScore","Reason"], "rows": []}#inendation 
+            if not rows:
+                return {"columns": ["Lead", "Vehicle", "Status", "LeadScore", "Reason"], "rows": []}
 
-    # Sort by (status priority first), then by Priority score
-        def _status_rank(s):
-            return -status_bonus.get(_norm_status(s), 0)  # negative so higher bonus -> smaller rank
+            # Sort by (status priority first), then by Priority score
+            def _status_rank(s: str) -> int:
+                return -status_bonus.get(_norm_status(s), 0)  # negative so higher bonus -> smaller rank
 
-        rows = sorted(rows, key=lambda x: (_status_rank(x["Status"]), -x["Priority"]))
+            rows = sorted(rows, key=lambda x: (_status_rank(x["Status"]), -x["Priority"]))
 
-        # Keep Top N
-        rows = rows[: max(1, top_n)]
+            # Keep Top N
+            rows = rows[: max(1, top_n)]
 
-        # Optional: replace reason with a short LLM line if enabled
-        rows_with_llm = _llm_reasons(rows)
-        for i, txt in enumerate(rows_with_llm):
-            if txt and isinstance(txt, str):
-                rows[i]["Reason"] = txt
+            # Optional: replace reason with a short LLM line if enabled
+            rows_with_llm = _llm_reasons(rows)
+            for i, txt in enumerate(rows_with_llm):
+                if txt and isinstance(txt, str):
+                    rows[i]["Reason"] = txt
 
-        payload = {
-            "columns": ["Lead","Vehicle","Status","LeadScore","Reason"],
-            "rows": [{k:v for k,v in r.items() if k in ["Lead","Vehicle","Status","LeadScore","Reason"]} for r in rows],
-        }
-        return payload
+            payload = {
+                "columns": ["Lead", "Vehicle", "Status", "LeadScore", "Reason"],
+                "rows": [{k: v for k, v in r.items() if k in ["Lead", "Vehicle", "Status", "LeadScore", "Reason"]} for r in rows],
+            }
+            return payload
 
-    # 5) Execute intent (all within current FILTERED VIEW)
+        # 5) Execute intent (all within current FILTERED VIEW)
         s_label = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%b %d, %Y")
         e_label = datetime.strptime(end_date_str,   "%Y-%m-%d").strftime("%b %d, %Y")
 
