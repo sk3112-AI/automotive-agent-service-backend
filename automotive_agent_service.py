@@ -605,6 +605,46 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
             "Error generating offer suggestion. Please try again."
         )
 # ---- Helper: normalize action statuses (case/spacing tolerant)
+# --- Helpers for explicit status reasons -------------------------------------
+def _topic_from_notes(notes: str) -> str | None:
+    n = (notes or "").lower()
+    keywords = [
+        (["price", "budget", "discount", "offer"], "pricing/offer"),
+        (["mainten", "service", "repair"], "maintenance concern"),
+        (["test", "drive", "td"], "test-drive scheduling"),
+        (["trade", "exchange"], "trade-in evaluation"),
+        (["availab", "stock", "delivery", "timeline"], "availability/delivery"),
+        (["finance", "loan", "emi"], "financing options"),
+    ]
+    for keys, topic in keywords:
+        if any(k in n for k in keys):
+            return topic
+    return None
+
+def _explicit_reason_for_row(row: dict) -> str:
+    st = (row.get("Status") or "").strip().lower()
+    ls = int(row.get("LeadScore") or 0)
+    age = int(row.get("AgeDays") or 0)
+    topic = _topic_from_notes(row.get("SalesNotes") or "")
+    base = None
+
+    if "call the customer (ai)" in st:
+        base = "Agent-flagged for immediate outreach"
+    elif "escalation initiated" in st:
+        base = "Escalation flagged — senior contact recommended"
+    else:
+        base = "Priority outreach recommended"
+
+    extras = []
+    if topic:
+        extras.append(f"re: {topic}")
+    if ls >= 15:
+        extras.append("high lead score")
+    if age <= 3:
+        extras.append("recent activity")
+
+    return base + (f" ({' • '.join(extras)})" if extras else "")
+
 def _norm_status(s: str) -> str:
     if not s:
         return ""
@@ -671,40 +711,68 @@ LLM_REASONS_ENABLED = (
     or "false"
 ).strip().lower() == "true"
 
-def _llm_reasons(rows: list[str]) -> list[str | None]:
-    # Must see both the toggle and a constructed client
+def _llm_reasons(rows: list[dict]) -> list[str | None]:
     global LLM_REASONS_ENABLED, openai_client, OPENAI_API_KEY
+
     if not LLM_REASONS_ENABLED or openai_client is None or not (OPENAI_API_KEY and OPENAI_API_KEY.strip()):
         logging.info(
             "LLM reasons disabled or client missing: enabled=%s, client=%s, key_set=%s",
-            LLM_REASONS_ENABLED,
-            bool(openai_client),
-            bool(OPENAI_API_KEY and OPENAI_API_KEY.strip()),
+            LLM_REASONS_ENABLED, bool(openai_client), bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
         )
         return [None] * len(rows)
 
-    reasons: list[str | None] = []
-    for r in rows:
-        # r is a dict with keys Lead, Status, LeadScore, SalesNotes, AgeDays...
-        brief = f"{r.get('Lead','')}; status={r.get('Status','')}; score={r.get('LeadScore',0)}; age_days={r.get('AgeDays',0)}; notes={ (r.get('SalesNotes') or '')[:160] }"
+    final: list[str | None] = []
+    to_llm: list[dict] = []
+    idx_map: list[int] = []
+
+    for i, r in enumerate(rows):
+        st = (r.get("Status") or "").strip().lower()
+
+        # 🔒 Do NOT call LLM for explicit statuses; use deterministic text
+        if "call the customer (ai)" in st or "escalation initiated" in st:
+            final.append(_explicit_reason_for_row(r))  # uses _topic_from_notes internally
+            continue
+
+        # Collect for LLM
+        to_llm.append({
+            "lead": r.get("Lead") or "",
+            "vehicle": r.get("Vehicle") or "",
+            "status": r.get("Status") or "",
+            "lead_score": int(r.get("LeadScore") or 0),
+            "age_days": int(r.get("AgeDays") or 0),
+            "notes": (r.get("SalesNotes") or "")[:1000],
+        })
+        idx_map.append(i)
+        final.append(None)
+
+    if not to_llm:
+        return final
+
+    # One-by-one is fine; you can batch if you like
+    for j, item in enumerate(to_llm):
+        brief = (
+            f"{item['lead']}; status={item['status']}; "
+            f"score={item['lead_score']}; age_days={item['age_days']}; "
+            f"notes={item['notes']}"
+        )
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",           # or "gpt-3.5-turbo" if you prefer
+                model="gpt-4o-mini",
                 temperature=0.2,
                 max_tokens=24,
                 messages=[
-                    {"role": "system", "content": "Return a single short reason (max ~10 words) why this lead is priority to call. No punctuation heavy lines."},
-                    {"role": "user", "content": brief}
+                    {"role": "system",
+                     "content": "Return ONE short, specific reason (≤14 words) a rep should call this lead today. Use notes if helpful. Do NOT mention scores or generic 'engagement'."},
+                    {"role": "user", "content": brief},
                 ],
             )
-            text = (resp.choices[0].message.content or "").strip()
-            reasons.append(text if text else None)
+            txt = (resp.choices[0].message.content or "").strip()
+            final[idx_map[j]] = txt or None
         except Exception as e:
-            logging.warning("LLM reason failed for %s: %s", r.get("Lead"), e)
-            reasons.append(None)
+            logging.warning("LLM reason failed for %s: %s", item.get("lead"), e)
+            final[idx_map[j]] = None
 
-    logging.info("LLM reasons produced %d/%d lines.", sum(1 for x in reasons if x), len(reasons))
-    return reasons
+    return final
 
 # --- ANALYTICS FUNCTION (MOVED FROM DASHBOARD.PY) ---
 class AnalyticsQueryRequest(BaseModel):
