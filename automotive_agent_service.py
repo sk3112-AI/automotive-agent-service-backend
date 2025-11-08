@@ -1825,21 +1825,21 @@ async def slack_interactivity(request: Request):
 
         if op == "mark_called":
             if not request_id:
-            _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t mark called."})
+                _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t mark called."})
+                return JSONResponse({})
+            who = _mark_called(request_id)
+            _post_to_response_url(response_url, {"response_type":"ephemeral","text": f"✅ Marked called: {who or request_id}"})
             return JSONResponse({})
-        who = _mark_called(request_id)
-        _post_to_response_url(response_url, {"response_type":"ephemeral","text": f"✅ Marked called: {who or request_id}"})
-        return JSONResponse({})
 
         if op == "update_sales_notes":
             if not request_id:
-            _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t update notes."})
+                _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t update notes."})
+                return JSONResponse({})
+            lead = _get_lead_core(request_id)
+            view = _update_notes_modal(request_id, lead.get("sales_notes") or "")
+            if slack_client and trigger_id:
+                slack_client.views_open(trigger_id=trigger_id, view=view)
             return JSONResponse({})
-        lead = _get_lead_core(request_id)
-        view = _update_notes_modal(request_id, lead.get("sales_notes") or "")
-        if slack_client and trigger_id:
-            slack_client.views_open(trigger_id=trigger_id, view=view)
-        return JSONResponse({})
         # Fallback: show what we received so you can fix Block Kit if needed
         _post_to_response_url(response_url, {
             "response_type": "ephemeral",
