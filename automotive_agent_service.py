@@ -26,6 +26,7 @@ from markdown_it import MarkdownIt
 from typing import Dict
 from urllib.parse import parse_qs
 md_converter = MarkdownIt()
+import requests
 
 # For IST timezone conversion for analytics
 try:
@@ -132,6 +133,15 @@ slack_signing_verifier = (
 # Optional: alias for legacy code
 sig_verifier = slack_signing_verifier
 AUTOMOTIVE_AGENT_URL = os.getenv("AUTOMOTIVE_AGENT_SERVICE_URL", "").rstrip("/")
+
+BASE_SERVICE_URL = (os.getenv("AUTOMOTIVE_AGENT_SERVICE_URL","").strip())
+if BASE_SERVICE_URL and not BASE_SERVICE_URL.startswith(("http://","https://")):
+    BASE_SERVICE_URL = "https://" + BASE_SERVICE_URL
+
+def _service_url(path: str) -> str | None:
+    if not BASE_SERVICE_URL:
+        return None
+    return f"{BASE_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}
 
 ENABLE_SMTP_SENDING = all([EMAIL_HOST, EMAIL_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD])
 if not ENABLE_SMTP_SENDING:
@@ -632,6 +642,8 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
             "Error generating offer suggestion. Please try again."
         )
 # ---- Helpers ----
+
+
 def _verify_slack(request: Request, raw: bytes) -> None:
     """
     Verify Slack signature. If not configured (local/dev), skip gracefully.
@@ -670,6 +682,12 @@ def _parse_last_days(text: str) -> int:
         d = int(m.group(1))
         return max(1, min(d, 180))
     return 30
+
+def _post_to_response_url(response_url: str, payload: dict):
+    try:
+        requests.post(response_url, json=payload, timeout=8)
+    except Exception as e:
+        logging.warning("Posting to response_url failed: %s", e)
 
 def _get_lead_core(request_id: str) -> dict:
     r = (supabase
@@ -738,6 +756,41 @@ def _mark_called(request_id: str):
     }).eq("request_id", request_id).execute()
     return lead.get("full_name") or request_id
 
+def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
+    """
+    Build Slack Block Kit from the RANK payload your /analyze-query returns.
+    """
+    title = analytics_json.get("result_message") or "Who to call (Top 10)"
+    rows = (analytics_json.get("payload") or {}).get("rows", [])
+    blocks = [
+        {"type":"section","text":{"type":"mrkdwn","text":f"*{title}*"}},
+        {"type":"divider"}
+    ]
+    if not rows:
+        blocks.append({"type":"section","text":{"type":"mrkdwn","text":"No candidates found."}})
+        return blocks
+
+    for r in rows[:10]:
+        lead   = r.get("Lead") or "—"
+        veh    = r.get("Vehicle") or "—"
+        status = r.get("Status") or "—"
+        score  = r.get("LeadScore", 0)
+        reason = r.get("Reason") or "—"
+        blocks.append({
+            "type":"section",
+            "text":{"type":"mrkdwn",
+                    "text":f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"},
+            "accessory":{
+                "type":"overflow",
+                "options":[
+                    {"text":{"type":"plain_text","text":"View summary"},       "value":f"view_summary::{lead}"},
+                    {"text":{"type":"plain_text","text":"Mark called"},        "value":f"mark_called::{lead}"},
+                    {"text":{"type":"plain_text","text":"Update sales notes"}, "value":f"update_notes::{lead}"},
+                ],
+                "action_id":"overflow_action"
+            }
+        })
+    return blocks
 # ---- Block Kit builders ----
 def _list_item_blocks(item: dict) -> list:
     """
@@ -1659,6 +1712,48 @@ async def slack_commands(request: Request):
     # Ephemeral is implied by JSON with blocks from slash commands
     return JSONResponse({"response_type": "ephemeral", "blocks": blocks})
 
+def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: str, user_id: str):
+    try:
+        if cmd == "/who_to_call":
+            # 30-day window (same as dashboard logic)
+            end_dt   = datetime.now(timezone.utc).date()
+            start_dt = end_dt - timedelta(days=30)
+            payload = {
+                "query_text": "who should i call",
+                "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date":   end_dt.strftime("%Y-%m-%d"),
+            }
+
+            url = _service_url("/analyze-query")
+            if not url:
+                # If base URL isn’t set, fail gracefully to the user
+                _post_to_response_url(response_url, {
+                    "response_type":"ephemeral",
+                    "text":"Config error: AUTOMOTIVE_AGENT_SERVICE_URL is not set."
+                })
+                return
+
+            r = requests.post(url, json=payload, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+
+            blocks = _format_call_list_blocks(data)
+            _post_to_response_url(response_url, {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "blocks": blocks
+            })
+        else:
+            _post_to_response_url(response_url, {
+                "response_type":"ephemeral",
+                "text": f"Unknown command: {cmd}"
+            })
+    except Exception as e:
+        _post_to_response_url(response_url, {
+            "response_type":"ephemeral",
+            "text": f"Error fetching call list: {e}"
+        })
+        
 @app.post("/slack/interactivity")
 async def slack_interactivity(request: Request):
     raw = await request.body()
