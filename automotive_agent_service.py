@@ -27,6 +27,7 @@ from typing import Dict
 from urllib.parse import parse_qs
 md_converter = MarkdownIt()
 from fastapi import BackgroundTasks
+import requests  # <-- add this
 
 # For IST timezone conversion for analytics
 try:
@@ -682,6 +683,13 @@ def _parse_last_days(text: str) -> int:
         d = int(m.group(1))
         return max(1, min(d, 180))
     return 30
+    
+def _post_to_response_url(response_url: str, payload: dict) -> None:
+    try:
+        resp = requests.post(response_url, json=payload, timeout=8)
+        resp.raise_for_status()
+    except Exception as e:
+        logging.warning("Posting to response_url failed: %s | url=%s | body=%s", e, response_url, payload)
 
 def _post_to_response_url(response_url: str, payload: dict):
     try:
@@ -1698,7 +1706,7 @@ async def slack_commands(request: Request, background_tasks: BackgroundTasks):
         {"response_type": "ephemeral", "text": "Fetching your call list… I'll post it here shortly."},
         status_code=200
     )
-    
+
 def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: str, user_id: str):
     try:
         if cmd == "/who_to_call":
