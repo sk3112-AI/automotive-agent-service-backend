@@ -2,6 +2,13 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import os
+# --- Slack + signing imports (place with other top-level imports) ---
+import os, time, hmac, hashlib
+from urllib.parse import parse_qs
+from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
+from slack_sdk.web import WebClient
+from slack_sdk.signature import SignatureVerifier
 from dotenv import load_dotenv
 import pandas as pd
 from openai import OpenAI
@@ -105,6 +112,11 @@ EMAIL_PORT_STR = os.getenv("EMAIL_PORT")
 EMAIL_PORT = int(EMAIL_PORT_STR) if EMAIL_PORT_STR else 0
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+# --- Slack env & client (place near other env var reads) ---
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
+SLACK_BOT_TOKEN      = os.getenv("SLACK_BOT_TOKEN", "")
+slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
+AUTOMOTIVE_AGENT_URL = os.getenv("AUTOMOTIVE_AGENT_SERVICE_URL", "").rstrip("/")
 
 ENABLE_SMTP_SENDING = all([EMAIL_HOST, EMAIL_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD])
 if not ENABLE_SMTP_SENDING:
@@ -604,6 +616,170 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
             "Error generating offer suggestion. Please try again.",
             "Error generating offer suggestion. Please try again."
         )
+# ---- Helpers ----
+def _verify_slack(req: Request, raw_body: bytes):
+    if not sig_verifier:
+        raise HTTPException(status_code=500, detail="Slack signing secret not configured")
+    ts = req.headers.get("X-Slack-Request-Timestamp", "")
+    sig = req.headers.get("X-Slack-Signature", "")
+    if not sig or not sig_verifier.is_valid(body=raw_body, timestamp=ts, signature=sig):
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+def _parse_last_days(text: str) -> int:
+    # supports "last 7d", "last 14d" ... defaults to 30
+    if not text:
+        return 30
+    m = re.search(r"last\s+(\d{1,3})\s*d", text.lower())
+    if m:
+        d = int(m.group(1))
+        return max(1, min(d, 180))
+    return 30
+
+def _get_lead_core(request_id: str) -> dict:
+    r = (supabase
+         .from_("bookings")
+         .select("request_id, full_name, email, vehicle, action_status, sales_notes, numeric_lead_score, booking_date")
+         .eq("request_id", request_id)
+         .limit(1)
+         .execute())
+    rows = r.data or []
+    return rows[0] if rows else {}
+
+def _get_email_insight(request_id: str) -> str | None:
+    """Primary ‘rolling_summary’ (email/overall) from ai_lead_insights."""
+    try:
+        r = (supabase
+             .from_("ai_lead_insights")
+             .select("rolling_summary, updated_at")
+             .eq("request_id", request_id)
+             .order("updated_at", desc=True)
+             .limit(1)
+             .execute())
+        rows = r.data or []
+        return (rows[0].get("rolling_summary") or "").strip() if rows else None
+    except Exception:
+        return None
+
+def _get_wa_summary(request_id: str) -> str | None:
+    """WhatsApp rolling summary (best-effort; schema-safe)."""
+    # Try the common shape first
+    try:
+        r = (supabase
+             .from_("wa_conversations")
+             .select("rolling_summary, updated_at")
+             .eq("request_id", request_id)
+             .order("updated_at", desc=True)
+             .limit(1)
+             .execute())
+        rows = r.data or []
+        return (rows[0].get("rolling_summary") or "").strip() if rows else None
+    except Exception:
+        # Fallback (if column name differs, you can adapt here)
+        try:
+            r = (supabase
+                 .from_("wa_conversations")
+                 .select("summary, updated_at")
+                 .eq("request_id", request_id)
+                 .order("updated_at", desc=True)
+                 .limit(1)
+                 .execute())
+            rows = r.data or []
+            return (rows[0].get("summary") or "").strip() if rows else None
+        except Exception:
+            return None
+
+def _update_sales_notes(request_id: str, notes: str):
+    supabase.from_("bookings").update({"sales_notes": notes}).eq("request_id", request_id).execute()
+
+def _mark_called(request_id: str):
+    """Set status and append a timestamp line to notes."""
+    lead = _get_lead_core(request_id)
+    now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    new_notes = ((lead.get("sales_notes") or "") + f"\n[Slack] Marked called on {now}").strip()
+    supabase.from_("bookings").update({
+        "action_status": "Engaged - Call",
+        "sales_notes": new_notes
+    }).eq("request_id", request_id).execute()
+    return lead.get("full_name") or request_id
+
+# ---- Block Kit builders ----
+def _list_item_blocks(item: dict) -> list:
+    """
+    item keys from your analytics payload rows:
+      Lead, Vehicle, Status, LeadScore, Reason, RequestID
+    """
+    title = f"*{item.get('Lead','Unknown')}* — {item.get('Vehicle','—')}  |  Score: {item.get('LeadScore',0)}  |  Status: {item.get('Status','—')}"
+    reason = item.get("Reason") or "—"
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": title + f"\n• _Reason_: {reason}"}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View summary"},
+                    "action_id": "view_summary",
+                    "value": json.dumps({"request_id": item.get("RequestID")}),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Mark called"},
+                    "action_id": "mark_called",
+                    "value": json.dumps({"request_id": item.get("RequestID")}),
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Update notes"},
+                    "action_id": "update_notes",
+                    "value": json.dumps({"request_id": item.get("RequestID")}),
+                },
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+def _summary_modal_blocks(lead: dict, email_summary: str | None, wa_summary: str | None) -> dict:
+    lead_title = f"{lead.get('full_name','Lead')} — {lead.get('vehicle','')}".strip(" —")
+    email_text = email_summary if (email_summary and email_summary.strip()) else "_No recent email summary_"
+    wa_text    = wa_summary if (wa_summary and wa_summary.strip()) else "_No recent WhatsApp summary_"
+
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{lead_title}*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Email summary*\n{email_text}"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*WhatsApp summary*\n{wa_text}"}},
+    ]
+    return {
+        "type": "modal",
+        "callback_id": "summary_modal",
+        "title": {"type": "plain_text", "text": "Lead Summary"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
+    }
+
+def _update_notes_modal(request_id: str, current: str) -> dict:
+    return {
+        "type": "modal",
+        "callback_id": "update_notes_submit",
+        "private_metadata": json.dumps({"request_id": request_id}),
+        "title": {"type": "plain_text", "text": "Update Sales Notes"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "notes_b",
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "notes_a",
+                    "multiline": True,
+                    "initial_value": current or "",
+                },
+                "label": {"type": "plain_text", "text": "Sales notes"},
+            }
+        ],
+    }
+
 # ---- Helper: normalize action statuses (case/spacing tolerant)
 # --- Helpers for explicit status reasons -------------------------------------
 def _topic_from_notes(notes: str) -> str | None:
@@ -1400,7 +1576,128 @@ async def mark_testdrives_due():
         "emails_sent": emailed,
         "skipped_already_due": skipped
     }
+# ---- Routes ----
+@app.post("/slack/commands")
+async def slack_commands(request: Request):
+    raw = await request.body()
+    _verify_slack(request, raw)
+    form = await request.form()
 
+    command    = form.get("command")
+    text       = form.get("text") or ""
+    channel_id = form.get("channel_id")
+
+    if command != "/who_to_call":
+        return PlainTextResponse("Unknown command", status_code=200)
+
+    # Date window
+    days = _parse_last_days(text)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days)
+
+    # Call your analytics ranker to reuse logic (“who should i call” intent)
+    try:
+        import requests
+        payload = {
+            "query_text": "who should i call",
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+        }
+        r = requests.post(f"{AUTOMOTIVE_AGENT_URL}/analyze-query", json=payload, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        rows = (data.get("payload") or {}).get("rows") or []
+    except Exception as ex:
+        return PlainTextResponse(f"Error fetching call list: {ex}", status_code=200)
+
+    blocks = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": f"☎️ Who to call (last {days}d)"}
+    }]
+
+    if not rows:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "_No eligible leads found._"}})
+    else:
+        for row in rows[:10]:
+            blocks.extend(_list_item_blocks(row))
+
+    # Ephemeral is implied by JSON with blocks from slash commands
+    return JSONResponse({"response_type": "ephemeral", "blocks": blocks})
+
+@app.post("/slack/interactivity")
+async def slack_interactivity(request: Request):
+    raw = await request.body()
+    _verify_slack(request, raw)
+    form = await request.form()
+    payload = json.loads(form.get("payload") or "{}")
+    t = payload.get("type")
+
+    # Button actions
+    if t == "block_actions":
+        actions    = payload.get("actions") or []
+        trigger_id = payload.get("trigger_id")
+        user       = payload.get("user", {})
+        channel    = (payload.get("channel") or {}).get("id")
+
+        if not actions:
+            return PlainTextResponse("", status_code=200)
+
+        action_id = actions[0].get("action_id")
+        val_raw   = actions[0].get("value") or "{}"
+        try:
+            val = json.loads(val_raw)
+        except Exception:
+            val = {}
+        request_id = val.get("request_id")
+
+        if action_id == "view_summary":
+            lead = _get_lead_core(request_id)
+            email_summary = _get_email_insight(request_id)
+            wa_summary    = _get_wa_summary(request_id)
+            view = _summary_modal_blocks(lead, email_summary, wa_summary)
+            if slack_client and trigger_id:
+                slack_client.views_open(trigger_id=trigger_id, view=view)
+            return PlainTextResponse("", status_code=200)
+
+        if action_id == "mark_called":
+            who = _mark_called(request_id)
+            # Best-effort ephemeral confirmation
+            if slack_client and channel and user.get("id"):
+                slack_client.chat_postEphemeral(
+                    channel=channel,
+                    user=user["id"],
+                    text=f"✅ Marked called: {who}",
+                )
+            return PlainTextResponse("", status_code=200)
+
+        if action_id == "update_notes":
+            lead = _get_lead_core(request_id)
+            view = _update_notes_modal(request_id, lead.get("sales_notes") or "")
+            if slack_client and trigger_id:
+                slack_client.views_open(trigger_id=trigger_id, view=view)
+            return PlainTextResponse("", status_code=200)
+
+        return PlainTextResponse("", status_code=200)
+
+    # Modal submission
+    if t == "view_submission":
+        cb = payload.get("view", {}).get("callback_id")
+        if cb == "update_notes_submit":
+            meta = payload.get("view", {}).get("private_metadata") or "{}"
+            meta = json.loads(meta)
+            request_id = meta.get("request_id")
+            state = payload.get("view", {}).get("state", {}).get("values", {})
+
+            notes = ""
+            for _, block in (state or {}).items():
+                el = block.get("notes_a") or {}
+                if isinstance(el, dict):
+                    notes = el.get("value", "") or notes
+
+            _update_sales_notes(request_id, notes)
+            return JSONResponse({"response_action": "clear"})
+
+    return PlainTextResponse("", status_code=200)
 # --- ENDPOINTS FOR LEAD INSIGHTS (Future extension if needed from agent service) ---
 # For now, Lead Insights remains an indicator in dashboard.py, but this service could
 # analyze and store insights in a separate DB table if it ran autonomously.
