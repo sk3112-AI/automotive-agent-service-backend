@@ -1843,7 +1843,7 @@ async def slack_interactivity(request: Request):
         # Fallback: show what we received so you can fix Block Kit if needed
         _post_to_response_url(response_url, {
             "response_type": "ephemeral",
-            "text": f"Unsupported action.\n(action_id={action_id}, value={raw_val}, op={op})"
+            "text": f"Unsupported action. (op={op}, req={request_id})"
         })
         return JSONResponse({})
 
