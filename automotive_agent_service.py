@@ -683,7 +683,7 @@ def _parse_last_days(text: str) -> int:
         d = int(m.group(1))
         return max(1, min(d, 180))
     return 30
-    
+
 def _post_to_response_url(response_url: str, payload: dict) -> None:
     try:
         resp = requests.post(response_url, json=payload, timeout=8)
@@ -1748,81 +1748,83 @@ def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: 
             "response_type":"ephemeral",
             "text": f"Error fetching call list: {e}"
         })
-
 @app.post("/slack/interactivity")
 async def slack_interactivity(request: Request):
     raw = await request.body()
     _verify_slack(request, raw)
-    form = await request.form()
+
+    form = await request.form()  # requires python-multipart
     payload = json.loads(form.get("payload") or "{}")
-    t = payload.get("type")
+    ptype = payload.get("type")
 
-    # Button actions
-    if t == "block_actions":
-        actions    = payload.get("actions") or []
-        trigger_id = payload.get("trigger_id")
-        user       = payload.get("user", {})
-        channel    = (payload.get("channel") or {}).get("id")
+    # ---------- BLOCK ACTIONS ----------
+    if ptype == "block_actions":
+        action      = (payload.get("actions") or [{}])[0]
+        action_id   = action.get("action_id")
+        trigger_id  = payload.get("trigger_id")
+        user_id     = (payload.get("user") or {}).get("id")
+        channel_id  = (payload.get("channel") or {}).get("id")
+        response_url = payload.get("response_url")
 
-        if not actions:
-            return PlainTextResponse("", status_code=200)
+        # Default interpretation assumes "buttons"
+        op = action_id
+        request_id = None
 
-        action_id = actions[0].get("action_id")
-        val_raw   = actions[0].get("value") or "{}"
-        try:
-            val = json.loads(val_raw)
-        except Exception:
-            val = {}
-        request_id = val.get("request_id")
+        # Support OVERFLOW (… menu)
+        if action_id == "overflow_actions":
+            # value looks like "view_summary|<request_id>"
+            sel = action.get("selected_option") or {}
+            val = sel.get("value", "")
+            op, request_id = (val.split("|", 1) + [""])[:2]
+        else:
+            # Support BUTTONS (value may be raw req_id or JSON {"request_id": "..."}
+            raw_val = action.get("value") or ""
+            try:
+                request_id = json.loads(raw_val).get("request_id")
+            except Exception:
+                request_id = raw_val
 
-        if action_id == "view_summary":
-            lead = _get_lead_core(request_id)
-            email_summary = _get_email_insight(request_id)
-            wa_summary    = _get_wa_summary(request_id)
-            view = _summary_modal_blocks(lead, email_summary, wa_summary)
+        # ---- Route operations ----
+        if op == "view_summary":
+            blocks_or_text = _summary_modal_blocks(request_id)  # returns {"blocks":[...]} or {"text":"..."}
+            _post_to_response_url(response_url, {"response_type": "ephemeral", **blocks_or_text})
+            return JSONResponse({})
+
+        if op == "mark_called":
+            ok = _mark_called(request_id)
+            _post_to_response_url(response_url, {
+                "response_type": "ephemeral",
+                "text": "✅ Marked as called." if ok else "⚠️ Could not mark as called."
+            })
+            return JSONResponse({})
+
+        if op == "update_sales_notes":
+            view = _update_notes_modal(request_id, "")  # keep your existing modal builder
             if slack_client and trigger_id:
                 slack_client.views_open(trigger_id=trigger_id, view=view)
-            return PlainTextResponse("", status_code=200)
+            return JSONResponse({})
 
-        if action_id == "mark_called":
-            who = _mark_called(request_id)
-            # Best-effort ephemeral confirmation
-            if slack_client and channel and user.get("id"):
-                slack_client.chat_postEphemeral(
-                    channel=channel,
-                    user=user["id"],
-                    text=f"✅ Marked called: {who}",
-                )
-            return PlainTextResponse("", status_code=200)
+        # Unknown op
+        _post_to_response_url(response_url, {"response_type":"ephemeral","text":"Unsupported action."})
+        return JSONResponse({})
 
-        if action_id == "update_notes":
-            lead = _get_lead_core(request_id)
-            view = _update_notes_modal(request_id, lead.get("sales_notes") or "")
-            if slack_client and trigger_id:
-                slack_client.views_open(trigger_id=trigger_id, view=view)
-            return PlainTextResponse("", status_code=200)
+    # ---------- MODAL SUBMIT ----------
+    if ptype == "view_submission":
+        view = payload.get("view") or {}
+        if view.get("callback_id") == "update_notes_submit":
+            meta   = json.loads(view.get("private_metadata") or "{}")
+            req_id = meta.get("request_id")
 
-        return PlainTextResponse("", status_code=200)
+            # Slack state shape: state.values[block_id][action_id].value
+            vals  = view.get("state", {}).get("values", {})
+            notes = vals.get("notes_block", {}).get("notes_a", {}).get("value", "")  # match your input ids
 
-    # Modal submission
-    if t == "view_submission":
-        cb = payload.get("view", {}).get("callback_id")
-        if cb == "update_notes_submit":
-            meta = payload.get("view", {}).get("private_metadata") or "{}"
-            meta = json.loads(meta)
-            request_id = meta.get("request_id")
-            state = payload.get("view", {}).get("state", {}).get("values", {})
-
-            notes = ""
-            for _, block in (state or {}).items():
-                el = block.get("notes_a") or {}
-                if isinstance(el, dict):
-                    notes = el.get("value", "") or notes
-
-            _update_sales_notes(request_id, notes)
+            _update_sales_notes(req_id, notes)
+            # tell Slack “close the modal”
             return JSONResponse({"response_action": "clear"})
 
     return PlainTextResponse("", status_code=200)
+
 # --- ENDPOINTS FOR LEAD INSIGHTS (Future extension if needed from agent service) ---
 # For now, Lead Insights remains an indicator in dashboard.py, but this service could
 # analyze and store insights in a separate DB table if it ran autonomously.
