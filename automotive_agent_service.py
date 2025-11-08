@@ -26,7 +26,7 @@ from markdown_it import MarkdownIt
 from typing import Dict
 from urllib.parse import parse_qs
 md_converter = MarkdownIt()
-import requests
+from fastapi import BackgroundTasks
 
 # For IST timezone conversion for analytics
 try:
@@ -1667,51 +1667,38 @@ async def mark_testdrives_due():
     }
 # ---- Routes ----
 @app.post("/slack/commands")
-async def slack_commands(request: Request):
+async def slack_commands(request: Request, background_tasks: BackgroundTasks):
+    # 0) Verify Slack signature quickly
     raw = await request.body()
     _verify_slack(request, raw)
-    form = await _parse_slack_form(request, raw)
-    command    = form.get("command")
-    text       = form.get("text") or ""
-    channel_id = form.get("channel_id")
 
+    # 1) Parse Slack's form-encoded payload
+    form = await request.form()  # requires python-multipart (you installed it)
+    command      = (form.get("command") or "").strip()
+    text         = (form.get("text") or "").strip()
+    response_url = (form.get("response_url") or "").strip()
+    channel_id   = (form.get("channel_id") or "").strip()
+    user_id      = (form.get("user_id") or "").strip()
+
+    # 2) Only handle our command
     if command != "/who_to_call":
         return PlainTextResponse("Unknown command", status_code=200)
 
-    # Date window
-    days = _parse_last_days(text)
-    end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=days)
+    # 3) Slack retry? ACK and do nothing (first attempt already queued a job)
+    if request.headers.get("X-Slack-Retry-Num"):
+        return JSONResponse({"response_type": "ephemeral", "text": "Working on it…"}, status_code=200)
 
-    # Call your analytics ranker to reuse logic (“who should i call” intent)
-    try:
-        import requests
-        payload = {
-            "query_text": "who should i call",
-            "start_date": start_date.strftime("%Y-%m-%d"),
-            "end_date": end_date.strftime("%Y-%m-%d"),
-        }
-        r = requests.post(f"{AUTOMOTIVE_AGENT_URL}/analyze-query", json=payload, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        rows = (data.get("payload") or {}).get("rows") or []
-    except Exception as ex:
-        return PlainTextResponse(f"Error fetching call list: {ex}", status_code=200)
+    # 4) Queue the heavy work and ACK immediately (prevents operation_timeout)
+    background_tasks.add_task(
+        _handle_slash_async_job,
+        command, text, response_url, channel_id, user_id
+    )
 
-    blocks = [{
-        "type": "header",
-        "text": {"type": "plain_text", "text": f"☎️ Who to call (last {days}d)"}
-    }]
-
-    if not rows:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "_No eligible leads found._"}})
-    else:
-        for row in rows[:10]:
-            blocks.extend(_list_item_blocks(row))
-
-    # Ephemeral is implied by JSON with blocks from slash commands
-    return JSONResponse({"response_type": "ephemeral", "blocks": blocks})
-
+    return JSONResponse(
+        {"response_type": "ephemeral", "text": "Fetching your call list… I'll post it here shortly."},
+        status_code=200
+    )
+    
 def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: str, user_id: str):
     try:
         if cmd == "/who_to_call":
