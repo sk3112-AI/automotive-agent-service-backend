@@ -1388,8 +1388,20 @@ async def analyze_query_endpoint(request_data: AnalyticsQueryRequest):
 
             payload = {
                 "columns": ["Lead", "Vehicle", "Status", "LeadScore", "Reason"],
-                "rows": [{k: v for k, v in r.items() if k in ["Lead", "Vehicle", "Status", "LeadScore", "Reason","RequestID": r.get("RequestID"),]} for r in rows],
+                "rows": [
+                    {
+                        "Lead":      r.get("Lead"),
+                        "Vehicle":   r.get("Vehicle"),
+                        "Status":    r.get("Status"),
+                        "LeadScore": r.get("LeadScore"),
+                        "Reason":    r.get("Reason"),
+                        # keep the id for Slack interactivity (not shown in table)
+                        "RequestID": r.get("RequestID"),
+                    }
+                    for r in rows
+                ],
             }
+
             return payload
 
         # 5) Execute intent (all within current FILTERED VIEW)
