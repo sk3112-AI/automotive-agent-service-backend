@@ -643,7 +643,24 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
             "Error generating offer suggestion. Please try again."
         )
 # ---- Helpers ----
+# ---- logging helpers (place near the top of your file) ----
+def _log_short(label: str, obj) -> None:
+    try:
+        s = json.dumps(obj)[:1200]
+    except Exception:
+        s = str(obj)[:1200]
+    logging.info("%s: %s", label, s)
 
+def _respond_ephemeral_fallback(response_url: str | None, channel_id: str | None, user_id: str | None, text: str):
+    """Use response_url if present, otherwise fallback to chat_postEphemeral."""
+    if response_url:
+        _post_to_response_url(response_url, {"response_type": "ephemeral", "text": text})
+        return
+    if slack_client and channel_id and user_id:
+        try:
+            slack_client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+        except Exception as e:
+            logging.warning("chat_postEphemeral failed: %s", e)
 
 def _verify_slack(request: Request, raw: bytes) -> None:
     """
@@ -691,16 +708,6 @@ def _post_to_response_url(response_url: str, body: dict):
     except Exception as e:
         logging.warning("Posting to response_url failed: %s", e)
 
-def _get_lead_core(request_id: str) -> dict:
-    r = (supabase
-         .from_("bookings")
-         .select("request_id, full_name, email, vehicle, action_status, sales_notes, numeric_lead_score, booking_date")
-         .eq("request_id", request_id)
-         .limit(1)
-         .execute())
-    rows = r.data or []
-    return rows[0] if rows else {}
-
 def _get_email_insight(request_id: str) -> str | None:
     """Primary ‘rolling_summary’ (email/overall) from ai_lead_insights."""
     try:
@@ -744,55 +751,80 @@ def _get_wa_summary(request_id: str) -> str | None:
         except Exception:
             return None
 
+def _get_lead_core(request_id: str) -> dict:
+    logging.info("DB fetch _get_lead_core request_id=%s", request_id)
+    r = (supabase
+         .from_("bookings")
+         .select("request_id, full_name, email, vehicle, action_status, sales_notes, numeric_lead_score, booking_date")
+         .eq("request_id", request_id)
+         .limit(1)
+         .execute())
+    rows = r.data or []
+    logging.info("_get_lead_core rows=%d", len(rows))
+    return rows[0] if rows else {}
+
 def _update_sales_notes(request_id: str, notes: str):
-    supabase.from_("bookings").update({"sales_notes": notes}).eq("request_id", request_id).execute()
+    logging.info("DB update notes request_id=%s len=%d", request_id, len(notes or ""))
+    resp = supabase.from_("bookings").update({"sales_notes": notes}).eq("request_id", request_id).execute()
+    _log_short("DB update notes resp", resp.data)
 
 def _mark_called(request_id: str):
-    """Set status and append a timestamp line to notes."""
     lead = _get_lead_core(request_id)
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     new_notes = ((lead.get("sales_notes") or "") + f"\n[Slack] Marked called on {now}").strip()
-    supabase.from_("bookings").update({
+    logging.info("DB mark_called request_id=%s name=%s", request_id, lead.get("full_name"))
+    resp = supabase.from_("bookings").update({
         "action_status": "Engaged - Call",
         "sales_notes": new_notes
     }).eq("request_id", request_id).execute()
+    _log_short("DB mark_called resp", resp.data)
     return lead.get("full_name") or request_id
 
 def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
     """
     Build Slack Block Kit from the RANK payload your /analyze-query returns.
+    IMPORTANT: each row MUST include RequestID so interactivity can look up DB rows.
     """
     title = analytics_json.get("result_message") or "Who to call (Top 10)"
     rows = (analytics_json.get("payload") or {}).get("rows", [])
     blocks = [
-        {"type":"section","text":{"type":"mrkdwn","text":f"*{title}*"}},
-        {"type":"divider"}
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+        {"type": "divider"},
     ]
+
     if not rows:
-        blocks.append({"type":"section","text":{"type":"mrkdwn","text":"No candidates found."}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "No candidates found."}})
         return blocks
 
     for r in rows[:10]:
-        lead   = r.get("Lead") or "—"
-        veh    = r.get("Vehicle") or "—"
-        status = r.get("Status") or "—"
-        score  = r.get("LeadScore", 0)
-        reason = r.get("Reason") or "—"
-        request_id = r.get("RequestID") or "" 
+        lead       = r.get("Lead") or "—"
+        veh        = r.get("Vehicle") or "—"
+        status     = r.get("Status") or "—"
+        score      = r.get("LeadScore", 0)
+        reason     = r.get("Reason") or "—"
+        request_id = r.get("RequestID") or ""          # <— CRITICAL
+
+        if not request_id:
+            logging.warning("Slack row missing RequestID for lead=%s vehicle=%s", lead, veh)
+
         blocks.append({
-            "type":"section",
-            "text":{"type":"mrkdwn",
-                    "text":f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"},
-            "accessory":{
-                "type":"overflow",
-                "options":[
-                    {"text":{"type":"plain_text","text":"View summary"},       "value": f"view_summary|{r.get('RequestID')}"},
-                    {"text":{"type":"plain_text","text":"Mark called"},        "value": f"mark_called|{r.get('RequestID')}" },
-                    {"text":{"type":"plain_text","text":"Update sales notes"}, "value": f"update_sales_notes|{r.get('RequestID')}"}
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"},
+            "accessory": {
+                "type": "overflow",
+                "action_id": "lead_actions",
+                "options": [
+                    {"text": {"type": "plain_text", "text": "View summary"},
+                     "value": f"view_summary|{request_id}"},
+                    {"text": {"type": "plain_text", "text": "Mark called"},
+                     "value": f"mark_called|{request_id}"},
+                    {"text": {"type": "plain_text", "text": "Update sales notes"},
+                     "value": f"update_sales_notes|{request_id}"},
                 ],
-                "action_id": "lead_actions"
-            }
+            },
         })
+        blocks.append({"type": "divider"})
     return blocks
 # ---- Block Kit builders ----
 def _list_item_blocks(item: dict) -> list:
@@ -874,51 +906,46 @@ def _update_notes_modal(request_id: str, current: str) -> dict:
 
 def _extract_op_and_req_id_from_action(payload: dict) -> tuple[str, str | None, str, str]:
     """
-    Returns: (op, request_id, action_id, raw_value)
-    Works for:
-      - Overflow menu values like "view_summary|01983-abc..."
-      - Button values like '{"request_id":"01983-abc..."}'
+    Returns: (op, request_id, action_id, raw_value).
+    Works for overflow values like "view_summary|0198abc..." and JSON buttons like {"request_id": "..."}.
     """
-    action    = (payload.get("actions") or [{}])[0]
-    action_id = action.get("action_id") or ""
+    act_list  = payload.get("actions") or [{}]
+    action    = act_list[0]
+    action_id = (action.get("action_id") or "").strip()
 
     raw_val = action.get("value")
     if not raw_val:
         sel = action.get("selected_option") or {}
         raw_val = sel.get("value")
 
-    op, request_id = action_id, None
     raw_val_str = (raw_val or "").strip()
+    op, request_id = action_id, None
 
-    # Case 1: try JSON
+    # Try JSON first
     try:
         maybe = json.loads(raw_val_str)
         if isinstance(maybe, dict) and "request_id" in maybe:
-            request_id = maybe["request_id"]
+            request_id = (maybe.get("request_id") or "").strip()
             op = action_id
     except Exception:
-        # Case 2: try "op|request_id"
+        # Try "op|request_id"
         if "|" in raw_val_str:
             left, right = raw_val_str.split("|", 1)
-            op = left or action_id
-            request_id = right or None
+            op = (left or action_id).strip()
+            request_id = (right or "").strip()
         else:
-            # Case 3: assume it's just the request_id alone
+            # Assume it is the request_id alone
             request_id = raw_val_str
-            op = action_id
 
     alias = {
-        "update_notes":       "update_sales_notes",
-        "updateNotes":        "update_sales_notes",
-        "overflow_action":    op,  # leave as-is
-        "lead_actions":       op,
+        "update_notes": "update_sales_notes",
+        "updateNotes":  "update_sales_notes",
+        "overflow_action": op,
+        "lead_actions":   op,
     }
     op = alias.get(op, op)
 
-    logging.info(
-        "Slack action parsed: action_id=%s, op=%s, request_id=%s, raw=%s",
-        action_id, op, request_id, raw_val_str
-    )
+    _log_short("SLACK action payload", {"action_id": action_id, "op": op, "raw": raw_val_str, "req_id": request_id})
     return op, request_id, action_id, raw_val_str
 
 # ---- Helper: normalize action statuses (case/spacing tolerant)
@@ -1801,50 +1828,50 @@ async def slack_interactivity(request: Request):
     form = await request.form()
     payload = json.loads(form.get("payload") or "{}")
     ptype = payload.get("type")
+    _log_short("SLACK interactivity type", ptype)
+    _log_short("SLACK interactivity (trimmed)", {k: payload.get(k) for k in ["type","user","channel","actions","view"]})
 
     if ptype == "block_actions":
         op, request_id, action_id, raw_val = _extract_op_and_req_id_from_action(payload)
         trigger_id   = payload.get("trigger_id")
-        response_url = payload.get("response_url")
+        response_url = payload.get("response_url")         # may be None in some block_actions
         user_id      = (payload.get("user") or {}).get("id")
         channel_id   = (payload.get("channel") or {}).get("id")
 
-        logging.info("Slack action: action_id=%s raw=%s -> op=%s req_id=%s", action_id, raw_val, op, request_id)
+        if not request_id:
+            _respond_ephemeral_fallback(response_url, channel_id, user_id, "⚠️ Missing request_id; action cannot proceed.")
+            return JSONResponse({})
 
         if op == "view_summary":
-            if not request_id:
-                _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ No request_id found for this item."})
-                return JSONResponse({})
             lead = _get_lead_core(request_id)
             email_summary = _get_email_insight(request_id)
             wa_summary    = _get_wa_summary(request_id)
             view = _summary_modal_blocks(lead, email_summary, wa_summary)
             if slack_client and trigger_id:
-                slack_client.views_open(trigger_id=trigger_id, view=view)
+                try:
+                    slack_client.views_open(trigger_id=trigger_id, view=view)
+                except Exception as e:
+                    logging.warning("views_open failed: %s", e)
+                    _respond_ephemeral_fallback(response_url, channel_id, user_id, "⚠️ Could not open modal.")
             return JSONResponse({})
 
         if op == "mark_called":
-            if not request_id:
-                _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t mark called."})
-                return JSONResponse({})
             who = _mark_called(request_id)
-            _post_to_response_url(response_url, {"response_type":"ephemeral","text": f"✅ Marked called: {who or request_id}"})
+            _respond_ephemeral_fallback(response_url, channel_id, user_id, f"✅ Marked called: {who}")
             return JSONResponse({})
 
         if op == "update_sales_notes":
-            if not request_id:
-                _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t update notes."})
-                return JSONResponse({})
             lead = _get_lead_core(request_id)
             view = _update_notes_modal(request_id, lead.get("sales_notes") or "")
             if slack_client and trigger_id:
-                slack_client.views_open(trigger_id=trigger_id, view=view)
+                try:
+                    slack_client.views_open(trigger_id=trigger_id, view=view)
+                except Exception as e:
+                    logging.warning("views_open failed: %s", e)
+                    _respond_ephemeral_fallback(response_url, channel_id, user_id, "⚠️ Could not open notes modal.")
             return JSONResponse({})
-        # Fallback: show what we received so you can fix Block Kit if needed
-        _post_to_response_url(response_url, {
-            "response_type": "ephemeral",
-            "text": f"Unsupported action. (op={op}, req={request_id})"
-        })
+
+        _respond_ephemeral_fallback(response_url, channel_id, user_id, f"Unsupported action. (op={op}, req={request_id})")
         return JSONResponse({})
 
     if ptype == "view_submission":
@@ -1854,10 +1881,10 @@ async def slack_interactivity(request: Request):
             req_id = meta.get("request_id")
             vals   = view.get("state", {}).get("values", {})
             notes  = vals.get("notes_b", {}).get("notes_a", {}).get("value", "")
+            logging.info("Modal submit: req_id=%s notes_len=%d", req_id, len(notes or ""))
             if req_id:
                 _update_sales_notes(req_id, notes)
             return JSONResponse({"response_action": "clear"})
-
 
     return PlainTextResponse("", status_code=200)
 
