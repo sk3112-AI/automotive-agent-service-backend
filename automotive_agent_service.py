@@ -23,6 +23,8 @@ import smtplib # Using smtplib for this service's emails as requested
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from markdown_it import MarkdownIt
+from typing import Dict
+from urllib.parse import parse_qs
 md_converter = MarkdownIt()
 
 # For IST timezone conversion for analytics
@@ -643,6 +645,21 @@ def _verify_slack(request: Request, raw: bytes) -> None:
     sig = request.headers.get("X-Slack-Signature", "")
     if not ts or not sig or not sig_verifier.is_valid(body=raw, timestamp=ts, signature=sig):
         raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+async def _parse_slack_form(request: Request, raw: bytes) -> Dict[str, str]:
+    """
+    Parse Slack x-www-form-urlencoded body. Uses python-multipart if available,
+    otherwise falls back to urllib.parse.
+    """
+    try:
+        # Preferred path (needs python-multipart)
+        form = await request.form()
+        # Starlette returns a FormData; normalize to plain dict[str,str]
+        return {k: (v if isinstance(v, str) else str(v)) for k, v in form.multi_items()}
+    except AssertionError:
+        # Fallback when python-multipart isn't installed
+        data = parse_qs(raw.decode("utf-8"))
+        return {k: (vals[0] if vals else "") for k, vals in data.items()}
 
 def _parse_last_days(text: str) -> int:
     # supports "last 7d", "last 14d" ... defaults to 30
@@ -1600,8 +1617,7 @@ async def mark_testdrives_due():
 async def slack_commands(request: Request):
     raw = await request.body()
     _verify_slack(request, raw)
-    form = await request.form()
-
+    form = await _parse_slack_form(request, raw)
     command    = form.get("command")
     text       = form.get("text") or ""
     channel_id = form.get("channel_id")
