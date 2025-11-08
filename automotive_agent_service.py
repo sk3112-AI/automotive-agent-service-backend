@@ -778,6 +778,7 @@ def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
         status = r.get("Status") or "—"
         score  = r.get("LeadScore", 0)
         reason = r.get("Reason") or "—"
+        request_id = r.get("RequestID") or "" 
         blocks.append({
             "type":"section",
             "text":{"type":"mrkdwn",
@@ -874,52 +875,51 @@ def _update_notes_modal(request_id: str, current: str) -> dict:
 def _extract_op_and_req_id_from_action(payload: dict) -> tuple[str, str | None, str, str]:
     """
     Returns: (op, request_id, action_id, raw_value)
-    Handles:
-      • Overflow: value = "view_summary|<request_id>"
-      • Buttons:  value = '{"request_id":"<id>"}'
-      • Raw:      value = "<request_id>"
+    Works for:
+      - Overflow menu values like "view_summary|01983-abc..."
+      - Button values like '{"request_id":"01983-abc..."}'
     """
-    action     = (payload.get("actions") or [{}])[0]
-    action_id  = action.get("action_id") or ""
-    raw_val    = action.get("value")
+    action    = (payload.get("actions") or [{}])[0]
+    action_id = action.get("action_id") or ""
+
+    raw_val = action.get("value")
     if not raw_val:
         sel = action.get("selected_option") or {}
         raw_val = sel.get("value")
 
     op, request_id = action_id, None
+    raw_val_str = (raw_val or "").strip()
 
-    # 1) Try JSON value first (buttons often send a JSON string)
-    if isinstance(raw_val, str):
-        raw_val_str = raw_val.strip()
-        try:
-            maybe = json.loads(raw_val_str)
-            if isinstance(maybe, dict) and "request_id" in maybe:
-                request_id = maybe.get("request_id")
-                op = action_id
-        except Exception:
-            # 2) Try pipe "op|request_id"
-            if "|" in raw_val_str:
-                parts = raw_val_str.split("|", 1)
-                op = parts[0] or action_id
-                request_id = parts[1] or None
-            else:
-                # 3) If it's just an id, treat as request_id
-                request_id = raw_val_str
+    # Case 1: try JSON
+    try:
+        maybe = json.loads(raw_val_str)
+        if isinstance(maybe, dict) and "request_id" in maybe:
+            request_id = maybe["request_id"]
+            op = action_id
+    except Exception:
+        # Case 2: try "op|request_id"
+        if "|" in raw_val_str:
+            left, right = raw_val_str.split("|", 1)
+            op = left or action_id
+            request_id = right or None
+        else:
+            # Case 3: assume it's just the request_id alone
+            request_id = raw_val_str
+            op = action_id
 
-    # Normalize common aliases (in case action_ids/values vary)
     alias = {
-        "update_notes": "update_sales_notes",
-        "updateNotes": "update_sales_notes",
-        "viewsummary": "view_summary",
-        "markcall":    "mark_called",
-        "overflow_action": op,
-        "lead_actions":    op,
+        "update_notes":       "update_sales_notes",
+        "updateNotes":        "update_sales_notes",
+        "overflow_action":    op,  # leave as-is
+        "lead_actions":       op,
     }
     op = alias.get(op, op)
 
-    logging.info("Slack action parsed: action_id=%s, op=%s, request_id=%s, raw=%s",
-                 action_id, op, request_id, raw_val)
-    return op, request_id, action_id, (raw_val if isinstance(raw_val, str) else json.dumps(raw_val) if raw_val else "")
+    logging.info(
+        "Slack action parsed: action_id=%s, op=%s, request_id=%s, raw=%s",
+        action_id, op, request_id, raw_val_str
+    )
+    return op, request_id, action_id, raw_val_str
 
 # ---- Helper: normalize action statuses (case/spacing tolerant)
 # --- Helpers for explicit status reasons -------------------------------------
