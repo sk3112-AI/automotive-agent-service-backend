@@ -785,11 +785,11 @@ def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
             "accessory":{
                 "type":"overflow",
                 "options":[
-                    {"text":{"type":"plain_text","text":"View summary"},       "value":f"view_summary::{lead}"},
-                    {"text":{"type":"plain_text","text":"Mark called"},        "value":f"mark_called::{lead}"},
-                    {"text":{"type":"plain_text","text":"Update sales notes"}, "value":f"update_notes::{lead}"},
+                    {"text":{"type":"plain_text","text":"View summary"},       "value": f"view_summary|{r.get('RequestID')}"},
+                    {"text":{"type":"plain_text","text":"Mark called"},        "value": f"mark_called|{r.get('RequestID')}" },
+                    {"text":{"type":"plain_text","text":"Update sales notes"}, "value": f"update_sales_notes|{r.get('RequestID')}"}
                 ],
-                "action_id":"overflow_action"
+                "action_id": "lead_actions"
             }
         })
     return blocks
@@ -870,6 +870,42 @@ def _update_notes_modal(request_id: str, current: str) -> dict:
             }
         ],
     }
+
+def _extract_op_and_req_id_from_action(payload: dict) -> tuple[str, str, str, str]:
+    """
+    Returns: (op, request_id, action_id, raw_value)
+    Works for both buttons (action.value) and overflow/static_select (selected_option.value).
+    Accepts both 'op|<request_id>' and just '<request_id>' shapes.
+    """
+    action = (payload.get("actions") or [{}])[0]
+    action_id = action.get("action_id") or ""
+
+    # raw value may come from button `value` or from `selected_option.value`
+    raw_val = action.get("value")
+    if not raw_val:
+        sel = action.get("selected_option") or {}
+        raw_val = sel.get("value")
+
+    op, request_id = None, None
+    if raw_val and "|" in raw_val:
+        op, request_id = (raw_val.split("|", 1) + [""])[:2]
+    else:
+        # If only request_id is present, treat op as the action_id
+        request_id = raw_val
+        op = action_id
+
+    # Normalize a few aliases you might have in your Block Kit
+    alias = {
+        "update_notes": "update_sales_notes",
+        "updateNotes": "update_sales_notes",
+        "viewsummary": "view_summary",
+        "markcall": "mark_called",
+        "overflow_actions": op,           # keep same if you used this id
+        "lead_actions": op,               # popular custom id
+    }
+    op = alias.get(op, op)
+    return op, request_id, action_id, raw_val or ""
+
 
 # ---- Helper: normalize action statuses (case/spacing tolerant)
 # --- Helpers for explicit status reasons -------------------------------------
@@ -1722,7 +1758,7 @@ def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: 
                 })
                 return
 
-            r = requests.post(url, json=payload, timeout=12)
+            r = requests.post(url, json=payload, timeout=20)
             r.raise_for_status()
             data = r.json()
 
@@ -1742,46 +1778,32 @@ def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: 
             "response_type":"ephemeral",
             "text": f"Error fetching call list: {e}"
         })
+
 @app.post("/slack/interactivity")
 async def slack_interactivity(request: Request):
     raw = await request.body()
     _verify_slack(request, raw)
 
-    form = await request.form()  # requires python-multipart
+    form = await request.form()
     payload = json.loads(form.get("payload") or "{}")
     ptype = payload.get("type")
 
-    # ---------- BLOCK ACTIONS ----------
     if ptype == "block_actions":
-        action      = (payload.get("actions") or [{}])[0]
-        action_id   = action.get("action_id")
-        trigger_id  = payload.get("trigger_id")
-        user_id     = (payload.get("user") or {}).get("id")
-        channel_id  = (payload.get("channel") or {}).get("id")
+        op, request_id, action_id, raw_val = _extract_op_and_req_id_from_action(payload)
+        trigger_id   = payload.get("trigger_id")
         response_url = payload.get("response_url")
+        user_id      = (payload.get("user") or {}).get("id")
+        channel_id   = (payload.get("channel") or {}).get("id")
 
-        # Default interpretation assumes "buttons"
-        op = action_id
-        request_id = None
+        logging.info("Slack action: action_id=%s raw=%s -> op=%s req_id=%s", action_id, raw_val, op, request_id)
 
-        # Support OVERFLOW (… menu)
-        if action_id == "overflow_actions":
-            # value looks like "view_summary|<request_id>"
-            sel = action.get("selected_option") or {}
-            val = sel.get("value", "")
-            op, request_id = (val.split("|", 1) + [""])[:2]
-        else:
-            # Support BUTTONS (value may be raw req_id or JSON {"request_id": "..."}
-            raw_val = action.get("value") or ""
-            try:
-                request_id = json.loads(raw_val).get("request_id")
-            except Exception:
-                request_id = raw_val
-
-        # ---- Route operations ----
         if op == "view_summary":
-            blocks_or_text = _summary_modal_blocks(request_id)  # returns {"blocks":[...]} or {"text":"..."}
-            _post_to_response_url(response_url, {"response_type": "ephemeral", **blocks_or_text})
+            lead = _get_lead_core(request_id)
+            email_summary = _get_email_insight(request_id)
+            wa_summary    = _get_wa_summary(request_id)
+            view = _summary_modal_blocks(lead, email_summary, wa_summary)
+            if slack_client and trigger_id:
+                slack_client.views_open(trigger_id=trigger_id, view=view)
             return JSONResponse({})
 
         if op == "mark_called":
@@ -1793,28 +1815,26 @@ async def slack_interactivity(request: Request):
             return JSONResponse({})
 
         if op == "update_sales_notes":
-            view = _update_notes_modal(request_id, "")  # keep your existing modal builder
+            view = _update_notes_modal(request_id, "")
             if slack_client and trigger_id:
                 slack_client.views_open(trigger_id=trigger_id, view=view)
             return JSONResponse({})
 
-        # Unknown op
-        _post_to_response_url(response_url, {"response_type":"ephemeral","text":"Unsupported action."})
+        # Fallback: show what we received so you can fix Block Kit if needed
+        _post_to_response_url(response_url, {
+            "response_type": "ephemeral",
+            "text": f"Unsupported action.\n(action_id={action_id}, value={raw_val}, op={op})"
+        })
         return JSONResponse({})
 
-    # ---------- MODAL SUBMIT ----------
     if ptype == "view_submission":
         view = payload.get("view") or {}
         if view.get("callback_id") == "update_notes_submit":
             meta   = json.loads(view.get("private_metadata") or "{}")
             req_id = meta.get("request_id")
-
-            # Slack state shape: state.values[block_id][action_id].value
-            vals  = view.get("state", {}).get("values", {})
-            notes = vals.get("notes_block", {}).get("notes_a", {}).get("value", "")  # match your input ids
-
+            vals   = view.get("state", {}).get("values", {})
+            notes  = vals.get("notes_b", {}).get("notes_a", {}).get("value", "")
             _update_sales_notes(req_id, notes)
-            # tell Slack “close the modal”
             return JSONResponse({"response_action": "clear"})
 
     return PlainTextResponse("", status_code=200)
