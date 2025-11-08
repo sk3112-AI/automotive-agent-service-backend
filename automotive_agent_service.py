@@ -1854,8 +1854,10 @@ async def slack_interactivity(request: Request):
             req_id = meta.get("request_id")
             vals   = view.get("state", {}).get("values", {})
             notes  = vals.get("notes_b", {}).get("notes_a", {}).get("value", "")
-            _update_sales_notes(req_id, notes)
+            if req_id:
+                _update_sales_notes(req_id, notes)
             return JSONResponse({"response_action": "clear"})
+
 
     return PlainTextResponse("", status_code=200)
 
