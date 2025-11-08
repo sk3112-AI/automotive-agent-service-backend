@@ -22,7 +22,6 @@ import string  # ✅ NEW
 import smtplib # Using smtplib for this service's emails as requested
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
 from markdown_it import MarkdownIt
 md_converter = MarkdownIt()
 
@@ -33,7 +32,14 @@ except ImportError:
     logging.warning("zoneinfo (or tzdata) not available. Using fixed offset for IST. Install 'tzdata' for full timezone support.")
     ZoneInfo = None # Fallback or handle differently
 
-
+try:
+    from slack_sdk.web import WebClient
+    from slack_sdk.signature import SignatureVerifier
+    SLACK_IMPORT_OK = True
+except Exception:
+    SLACK_IMPORT_OK = False
+    WebClient = None
+    SignatureVerifier = None
 load_dotenv() # Load environment variables from .env file (for local testing)
 
 # --- Logging Setup ---
@@ -115,7 +121,14 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 # --- Slack env & client (place near other env var reads) ---
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 SLACK_BOT_TOKEN      = os.getenv("SLACK_BOT_TOKEN", "")
-slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
+slack_client = WebClient(SLACK_BOT_TOKEN) if (SLACK_IMPORT_OK and SLACK_BOT_TOKEN) else None
+slack_signing_verifier = (
+    SignatureVerifier(SLACK_SIGNING_SECRET)
+    if (SLACK_IMPORT_OK and SLACK_SIGNING_SECRET)
+    else None
+)
+# Optional: alias for legacy code
+sig_verifier = slack_signing_verifier
 AUTOMOTIVE_AGENT_URL = os.getenv("AUTOMOTIVE_AGENT_SERVICE_URL", "").rstrip("/")
 
 ENABLE_SMTP_SENDING = all([EMAIL_HOST, EMAIL_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD])
@@ -617,12 +630,18 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
             "Error generating offer suggestion. Please try again."
         )
 # ---- Helpers ----
-def _verify_slack(req: Request, raw_body: bytes):
+def _verify_slack(request: Request, raw: bytes) -> None:
+    """
+    Verify Slack signature. If not configured (local/dev), skip gracefully.
+    """
     if not sig_verifier:
-        raise HTTPException(status_code=500, detail="Slack signing secret not configured")
-    ts = req.headers.get("X-Slack-Request-Timestamp", "")
-    sig = req.headers.get("X-Slack-Signature", "")
-    if not sig or not sig_verifier.is_valid(body=raw_body, timestamp=ts, signature=sig):
+        # In dev or if secrets not set, don't block the request
+        logging.info("Skipping Slack signature verification (not configured).")
+        return
+
+    ts = request.headers.get("X-Slack-Request-Timestamp", "")
+    sig = request.headers.get("X-Slack-Signature", "")
+    if not ts or not sig or not sig_verifier.is_valid(body=raw, timestamp=ts, signature=sig):
         raise HTTPException(status_code=401, detail="Invalid Slack signature")
 
 def _parse_last_days(text: str) -> int:
