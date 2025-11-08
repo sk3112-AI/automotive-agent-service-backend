@@ -1812,6 +1812,9 @@ async def slack_interactivity(request: Request):
         logging.info("Slack action: action_id=%s raw=%s -> op=%s req_id=%s", action_id, raw_val, op, request_id)
 
         if op == "view_summary":
+            if not request_id:
+                _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ No request_id found for this item."})
+                return JSONResponse({})
             lead = _get_lead_core(request_id)
             email_summary = _get_email_insight(request_id)
             wa_summary    = _get_wa_summary(request_id)
@@ -1821,19 +1824,22 @@ async def slack_interactivity(request: Request):
             return JSONResponse({})
 
         if op == "mark_called":
-            ok = _mark_called(request_id)
-            _post_to_response_url(response_url, {
-                "response_type": "ephemeral",
-                "text": "✅ Marked as called." if ok else "⚠️ Could not mark as called."
-            })
+            if not request_id:
+            _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t mark called."})
             return JSONResponse({})
+        who = _mark_called(request_id)
+        _post_to_response_url(response_url, {"response_type":"ephemeral","text": f"✅ Marked called: {who or request_id}"})
+        return JSONResponse({})
 
         if op == "update_sales_notes":
-            view = _update_notes_modal(request_id, "")
-            if slack_client and trigger_id:
-                slack_client.views_open(trigger_id=trigger_id, view=view)
+            if not request_id:
+            _post_to_response_url(response_url, {"response_type":"ephemeral","text":"⚠️ Missing request_id; can’t update notes."})
             return JSONResponse({})
-
+        lead = _get_lead_core(request_id)
+        view = _update_notes_modal(request_id, lead.get("sales_notes") or "")
+        if slack_client and trigger_id:
+            slack_client.views_open(trigger_id=trigger_id, view=view)
+        return JSONResponse({})
         # Fallback: show what we received so you can fix Block Kit if needed
         _post_to_response_url(response_url, {
             "response_type": "ephemeral",
