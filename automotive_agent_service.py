@@ -871,41 +871,55 @@ def _update_notes_modal(request_id: str, current: str) -> dict:
         ],
     }
 
-def _extract_op_and_req_id_from_action(payload: dict) -> tuple[str, str, str, str]:
+def _extract_op_and_req_id_from_action(payload: dict) -> tuple[str, str | None, str, str]:
     """
     Returns: (op, request_id, action_id, raw_value)
-    Works for both buttons (action.value) and overflow/static_select (selected_option.value).
-    Accepts both 'op|<request_id>' and just '<request_id>' shapes.
+    Handles:
+      • Overflow: value = "view_summary|<request_id>"
+      • Buttons:  value = '{"request_id":"<id>"}'
+      • Raw:      value = "<request_id>"
     """
-    action = (payload.get("actions") or [{}])[0]
-    action_id = action.get("action_id") or ""
-
-    # raw value may come from button `value` or from `selected_option.value`
-    raw_val = action.get("value")
+    action     = (payload.get("actions") or [{}])[0]
+    action_id  = action.get("action_id") or ""
+    raw_val    = action.get("value")
     if not raw_val:
         sel = action.get("selected_option") or {}
         raw_val = sel.get("value")
 
-    op, request_id = None, None
-    if raw_val and "|" in raw_val:
-        op, request_id = (raw_val.split("|", 1) + [""])[:2]
-    else:
-        # If only request_id is present, treat op as the action_id
-        request_id = raw_val
-        op = action_id
+    op, request_id = action_id, None
 
-    # Normalize a few aliases you might have in your Block Kit
+    # 1) Try JSON value first (buttons often send a JSON string)
+    if isinstance(raw_val, str):
+        raw_val_str = raw_val.strip()
+        try:
+            maybe = json.loads(raw_val_str)
+            if isinstance(maybe, dict) and "request_id" in maybe:
+                request_id = maybe.get("request_id")
+                op = action_id
+        except Exception:
+            # 2) Try pipe "op|request_id"
+            if "|" in raw_val_str:
+                parts = raw_val_str.split("|", 1)
+                op = parts[0] or action_id
+                request_id = parts[1] or None
+            else:
+                # 3) If it's just an id, treat as request_id
+                request_id = raw_val_str
+
+    # Normalize common aliases (in case action_ids/values vary)
     alias = {
         "update_notes": "update_sales_notes",
         "updateNotes": "update_sales_notes",
         "viewsummary": "view_summary",
-        "markcall": "mark_called",
-        "overflow_actions": op,           # keep same if you used this id
-        "lead_actions": op,               # popular custom id
+        "markcall":    "mark_called",
+        "overflow_action": op,
+        "lead_actions":    op,
     }
     op = alias.get(op, op)
-    return op, request_id, action_id, raw_val or ""
 
+    logging.info("Slack action parsed: action_id=%s, op=%s, request_id=%s, raw=%s",
+                 action_id, op, request_id, raw_val)
+    return op, request_id, action_id, (raw_val if isinstance(raw_val, str) else json.dumps(raw_val) if raw_val else "")
 
 # ---- Helper: normalize action statuses (case/spacing tolerant)
 # --- Helpers for explicit status reasons -------------------------------------
