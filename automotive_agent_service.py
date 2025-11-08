@@ -141,7 +141,7 @@ if BASE_SERVICE_URL and not BASE_SERVICE_URL.startswith(("http://","https://")):
 def _service_url(path: str) -> str | None:
     if not BASE_SERVICE_URL:
         return None
-    return f"{BASE_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}
+    return f"{BASE_SERVICE_URL.rstrip('/')}/{path.lstrip('/')}"
 
 ENABLE_SMTP_SENDING = all([EMAIL_HOST, EMAIL_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD])
 if not ENABLE_SMTP_SENDING:
@@ -1753,7 +1753,7 @@ def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: 
             "response_type":"ephemeral",
             "text": f"Error fetching call list: {e}"
         })
-        
+
 @app.post("/slack/interactivity")
 async def slack_interactivity(request: Request):
     raw = await request.body()
