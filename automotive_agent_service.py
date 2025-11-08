@@ -684,16 +684,10 @@ def _parse_last_days(text: str) -> int:
         return max(1, min(d, 180))
     return 30
 
-def _post_to_response_url(response_url: str, payload: dict) -> None:
+def _post_to_response_url(response_url: str, body: dict):
+    import requests
     try:
-        resp = requests.post(response_url, json=payload, timeout=8)
-        resp.raise_for_status()
-    except Exception as e:
-        logging.warning("Posting to response_url failed: %s | url=%s | body=%s", e, response_url, payload)
-
-def _post_to_response_url(response_url: str, payload: dict):
-    try:
-        requests.post(response_url, json=payload, timeout=8)
+        requests.post(response_url, json=body, timeout=10)
     except Exception as e:
         logging.warning("Posting to response_url failed: %s", e)
 
