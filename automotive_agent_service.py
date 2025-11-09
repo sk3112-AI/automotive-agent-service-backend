@@ -912,14 +912,28 @@ def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
     return blocks
 
 # ===== Slack Summary UX: open fast, fill later =====
-
-def _reply_ephemeral(response_url: str | None, channel_id: str | None, user_id: str | None, text: str):
-    """Prefer response_url; fall back to chat.postEphemeral."""
+def _reply_ephemeral(response_url: str | None,
+                     channel_id: str | None,
+                     user_id: str | None,
+                     text: str):
+    """
+    Post a *separate* ephemeral ack that does NOT replace the original list.
+    Prefer chat.postEphemeral; only fall back to response_url with replace_original=False.
+    """
     try:
-        if response_url:
-            _post_to_response_url(response_url, {"response_type": "ephemeral", "text": text})
-        elif slack_client and channel_id and user_id:
+        # 1) Best: dedicated ephemeral that never touches the original message
+        if slack_client and channel_id and user_id:
             slack_client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+            return
+
+        # 2) Fallback: response_url, but force it NOT to replace the original
+        if response_url:
+            _post_to_response_url(response_url, {
+                "response_type": "ephemeral",
+                "replace_original": False,
+                "delete_original": False,
+                "text": text
+            })
     except Exception as e:
         logging.warning("ephemeral reply failed: %s", e)
 
