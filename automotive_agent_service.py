@@ -671,31 +671,6 @@ def _log_short(label: str, obj) -> None:
     logging.info("%s: %s", label, s)
 
 # Put near other Slack helpers
-def _refresh_who_to_call_message(response_url: str | None):
-    """Recompute the list and replace the original message so the UI updates."""
-    if not response_url:
-        return
-    try:
-        end_dt   = datetime.now(timezone.utc).date()
-        start_dt = end_dt - timedelta(days=30)
-        payload = {
-            "query_text": "who should i call",
-            "start_date": start_dt.strftime("%Y-%m-%d"),
-            "end_date":   end_dt.strftime("%Y-%m-%d"),
-        }
-        url = _service_url("/analyze-query")
-        r = requests.post(url, json=payload, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        blocks = _format_call_list_blocks(data)
-        _post_to_response_url(response_url, {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": blocks
-        })
-    except Exception as e:
-        logging.warning("refresh_who_to_call failed: %s", e)
-
 def _respond_ephemeral_fallback(response_url: str | None, channel_id: str | None, user_id: str | None, text: str):
     """Use response_url if present, otherwise fallback to chat_postEphemeral."""
     if response_url:
@@ -978,12 +953,17 @@ def _build_final_summary_view(lead: dict, email_summary: str | None, wa_summary:
     }
 
 def _async_fill_summary_and_update_modal(view_id: str, request_id: str):
-    """Runs outside the 3s Slack window; fetches + (optionally) LLM-summarizes, then views_update."""
+    """Runs outside the 3s Slack window; fetch + summarize; then views_update."""
     try:
         lead = _get_lead_core(request_id)
-        email_summary = _get_email_insight(request_id)
-        wa_summary    = _get_wa_summary(request_id)
-        final_view    = _build_final_summary_view(lead, email_summary, wa_summary)
+        email_raw = _get_email_insight(request_id)
+        wa_raw    = _get_wa_summary(request_id)
+
+        # summarize with your existing helper
+        email_sum = _briefify(email_raw) if (email_raw and email_raw.strip()) else None
+        wa_sum    = _briefify(wa_raw)    if (wa_raw and wa_raw.strip())    else None
+
+        final_view = _build_final_summary_view(lead, email_sum, wa_sum)
         if slack_client and view_id:
             slack_client.views_update(view_id=view_id, view=final_view)
     except Exception as e:
