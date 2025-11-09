@@ -742,6 +742,7 @@ def _get_email_insight(request_id: str) -> str | None:
     except Exception:
         return None
 
+
 def _get_wa_summary(request_id: str) -> str | None:
     """WhatsApp rolling summary (best-effort; schema-safe)."""
     # Try the common shape first
@@ -839,19 +840,31 @@ def _mark_called(request_id: str):
     _log_short("DB mark_called resp", resp.data)
     return lead.get("full_name") or request_id
 
+def _resolve_request_id_by_hint(lead: str, vehicle: str) -> str | None:
+    try:
+        r = (supabase
+             .from_("bookings")
+             .select("request_id, full_name, vehicle, booking_timestamp")
+             .eq("full_name", lead)
+             .eq("vehicle", vehicle)
+             .order("booking_timestamp", desc=True)
+             .limit(1)
+             .execute())
+        rows = r.data or []
+        return rows[0].get("request_id") if rows else None
+    except Exception as e:
+        logging.warning("resolve_request_id failed for %s/%s: %s", lead, vehicle, e)
+        return None
+
 def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
-    """
-    Build Slack Block Kit from the RANK payload your /analyze-query returns.
-    Ensures every row ends up with a RequestID (using a DB fallback if needed).
-    """
     title = analytics_json.get("result_message") or "Who to call (Top 10)"
     rows  = (analytics_json.get("payload") or {}).get("rows", [])
     blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
-        {"type": "divider"},
+        {"type":"section","text":{"type":"mrkdwn","text":f"*{title}*"}},
+        {"type":"divider"}
     ]
     if not rows:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "No candidates found."}})
+        blocks.append({"type":"section","text":{"type":"mrkdwn","text":"No candidates found."}})
         return blocks
 
     for r in rows[:10]:
@@ -861,36 +874,99 @@ def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
         score  = r.get("LeadScore", 0)
         reason = r.get("Reason") or "—"
 
-        # 1) Get a request id; fallback by name+vehicle if missing
-        req_id = r.get("RequestID") or r.get("request_id")
+        req_id = r.get("RequestID") or _resolve_request_id_by_hint(lead, veh)
         if not req_id:
-            req_id = _lookup_request_id_by_name_vehicle(lead, veh)
-            if not req_id:
-                logging.warning("Slack row missing RequestID for lead=%s vehicle=%s", lead, veh)
-
-        # 2) Encode as "op|req" so _extract_op_and_req_id_from_action can parse reliably
-        view_val = f"view_summary|{req_id}" if req_id else "view_summary|"
-        call_val = f"mark_called|{req_id}"  if req_id else "mark_called|"
-        note_val = f"update_sales_notes|{req_id}" if req_id else "update_sales_notes|"
+            logging.warning("Slack row missing RequestID for lead=%s vehicle=%s", lead, veh)
 
         blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"
-            },
-            "accessory": {
-                "type": "overflow",
-                "options": [
-                    {"text": {"type": "plain_text", "text": "View summary"},       "value": view_val},
-                    {"text": {"type": "plain_text", "text": "Mark called"},        "value": call_val},
-                    {"text": {"type": "plain_text", "text": "Update sales notes"}, "value": note_val},
+            "type":"section",
+            "text":{"type":"mrkdwn",
+                    "text":f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"},
+            "accessory":{
+                "type":"overflow",
+                "options":[
+                    {"text":{"type":"plain_text","text":"View summary"},       "value": f"view_summary|{req_id or ''}"},
+                    {"text":{"type":"plain_text","text":"Mark called"},        "value": f"mark_called|{req_id or ''}"},
+                    {"text":{"type":"plain_text","text":"Update sales notes"}, "value": f"update_sales_notes|{req_id or ''}"},
                 ],
-                "action_id": "lead_actions",
-            },
+                "action_id": "lead_actions"
+            }
         })
-
     return blocks
+
+# ===== Slack Summary UX: open fast, fill later =====
+
+def _summary_modal_placeholder(request_id: str) -> dict:
+    """Quick modal to beat Slack’s ~3s trigger timeout."""
+    return {
+        "type": "modal",
+        "callback_id": "summary_modal",
+        "private_metadata": json.dumps({"request_id": request_id}),
+        "title": {"type": "plain_text", "text": "Lead Summary"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {"type": "section",
+             "text": {"type": "mrkdwn", "text": "*Loading summary…*"}}],
+    }
+
+def _summarize_with_llm(txt: str, kind: str) -> str:
+    """
+    Short summary for WA/Email rolling text. If you already have
+    briefify/clean_transcript, we’ll use them automatically.
+    Falls back to original text on any error or missing client.
+    """
+    if not txt:
+        return ""
+    # Optional local pre-cleaners
+    try:
+        if 'clean_transcript' in globals() and callable(clean_transcript):
+            txt = clean_transcript(txt)
+        if 'briefify' in globals() and callable(briefify):
+            txt = briefify(txt)
+    except Exception:
+        pass
+
+    if not (openai_client and OPENAI_API_KEY and OPENAI_API_KEY.strip()):
+        return txt
+
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.2,
+            max_tokens=140,
+            messages=[
+                {"role": "system",
+                 "content": f"Summarize the {kind} engagement for a sales rep in 4–6 terse bullets. "
+                            "Be concrete; note intent/sentiment if obvious."},
+                {"role": "user", "content": txt[:5000]},
+            ],
+        )
+        out = (resp.choices[0].message.content or "").strip()
+        return out or txt
+    except Exception as e:
+        logging.warning("LLM summarize failed (%s): %s", kind, e)
+        return txt
+
+def _async_fill_summary_and_update_modal(view_id: str, request_id: str):
+    """Runs after the modal is opened, then updates it with final content."""
+    lead = _get_lead_core(request_id)
+    email_summary = _get_email_insight(request_id)
+    wa_summary    = _get_wa_summary(request_id)
+
+    # Optional LLM shortening (nice for long WA logs)
+    if email_summary:
+        email_summary = _summarize_with_llm(email_summary, "email")
+    if wa_summary:
+        wa_summary    = _summarize_with_llm(wa_summary, "whatsapp")
+
+    view = _summary_modal_blocks(lead, email_summary, wa_summary)
+
+    try:
+        if slack_client and view_id:
+            slack_client.views_update(view_id=view_id, view=view)
+    except Exception as e:
+        logging.warning("views_update failed: %s", getattr(e, "response", e))
+
 # ---- Block Kit builders ----
 def _list_item_blocks(item: dict) -> list:
     """
@@ -1918,6 +1994,34 @@ async def slack_interactivity(request: Request):
 
         if not request_id:
             _respond_ephemeral_fallback(response_url, channel_id, user_id, "⚠️ Missing request_id; action cannot proceed.")
+            return JSONResponse({})
+        
+        if op == "view_summary":
+            if not request_id:
+                _post_to_response_url(response_url, {
+                    "response_type": "ephemeral",
+                    "text": "⚠️ Missing request_id for this row."
+                })
+                return JSONResponse({})
+
+            # 1) Open a quick modal so the trigger_id doesn't expire (~3s SLA)
+            view_id = None
+            try:
+                res = slack_client.views_open(
+                    trigger_id=payload.get("trigger_id"),
+                    view=_summary_modal_placeholder(request_id)
+                )
+                view_id = (res or {}).get("view", {}).get("id")
+            except Exception as e:
+                logging.warning("views_open failed: %s", getattr(e, "response", e))
+                _post_to_response_url(response_url, {
+                    "response_type": "ephemeral",
+                    "text": "Could not open summary modal."
+                })
+                return JSONResponse({})
+
+            # 2) Fetch + (optionally) LLM-summarize asynchronously, then update the modal
+            background_tasks.add_task(_async_fill_summary_and_update_modal, view_id, request_id)
             return JSONResponse({})
 
         if op == "view_summary":
