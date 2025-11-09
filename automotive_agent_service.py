@@ -644,6 +644,25 @@ Return strictly valid JSON with keys "analysis", "subject", and "body".
         )
 # ---- Helpers ----
 # ---- logging helpers (place near the top of your file) ----
+def _lookup_request_id_by_name_vehicle(full_name: str, vehicle: str) -> str | None:
+    """Best-effort fallback when the rank rows miss RequestID."""
+    try:
+        # Relax the match on name a bit; keep vehicle exact.
+        q = (supabase
+             .from_("bookings")
+             .select("request_id, booking_timestamp")
+             .ilike("full_name", full_name)   # match case-insensitive
+             .eq("vehicle", vehicle)
+             .order("booking_timestamp", desc=True)
+             .limit(1)
+             .execute())
+        rows = q.data or []
+        return rows[0]["request_id"] if rows else None
+    except Exception as e:
+        logging.warning("lookup request_id failed for name=%r vehicle=%r: %s",
+                        full_name, vehicle, e)
+        return None
+
 def _log_short(label: str, obj) -> None:
     try:
         s = json.dumps(obj)[:1200]
@@ -750,6 +769,46 @@ def _get_wa_summary(request_id: str) -> str | None:
             return (rows[0].get("summary") or "").strip() if rows else None
         except Exception:
             return None
+import re
+
+def _clean_transcript(t: str) -> str:
+    if not t:
+        return ""
+    # Remove repetitive "Bot:" / "User:" tags etc.
+    t = re.sub(r"\b(?:User|Bot)\s*:\s*", "", t, flags=re.IGNORECASE)
+    # Trim ugly demo guardrails text if present
+    t = t.replace("Outside the context of demo", "")
+    return t.strip()
+
+def _briefify(text: str, n_bullets: int = 3) -> str:
+    """
+    If OpenAI client is available, produce a short 3-bullet summary.
+    Otherwise return a truncated clean snippet.
+    """
+    if not text:
+        return ""
+    t = _clean_transcript(text)
+
+    # LLM path
+    if 'openai_client' in globals() and openai_client is not None:
+        try:
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.2,
+                max_tokens=160,
+                messages=[
+                    {"role": "system",
+                     "content": "Summarize for a sales rep in 3 bullets: customer intent, objections, and next step. No preamble."},
+                    {"role": "user", "content": t[:4000]},
+                ],
+            )
+            out = (resp.choices[0].message.content or "").strip()
+            return out
+        except Exception as e:
+            logging.warning("LLM briefify failed: %s", e)
+
+    # Fallback (no LLM or failure)
+    return (t[:800] + ("…" if len(t) > 800 else ""))
 
 def _get_lead_core(request_id: str) -> dict:
     logging.info("DB fetch _get_lead_core request_id=%s", request_id)
@@ -783,48 +842,54 @@ def _mark_called(request_id: str):
 def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
     """
     Build Slack Block Kit from the RANK payload your /analyze-query returns.
-    IMPORTANT: each row MUST include RequestID so interactivity can look up DB rows.
+    Ensures every row ends up with a RequestID (using a DB fallback if needed).
     """
     title = analytics_json.get("result_message") or "Who to call (Top 10)"
-    rows = (analytics_json.get("payload") or {}).get("rows", [])
+    rows  = (analytics_json.get("payload") or {}).get("rows", [])
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
         {"type": "divider"},
     ]
-
     if not rows:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "No candidates found."}})
         return blocks
 
     for r in rows[:10]:
-        lead       = r.get("Lead") or "—"
-        veh        = r.get("Vehicle") or "—"
-        status     = r.get("Status") or "—"
-        score      = r.get("LeadScore", 0)
-        reason     = r.get("Reason") or "—"
-        request_id = r.get("RequestID") or ""          # <— CRITICAL
+        lead   = r.get("Lead") or "—"
+        veh    = r.get("Vehicle") or "—"
+        status = r.get("Status") or "—"
+        score  = r.get("LeadScore", 0)
+        reason = r.get("Reason") or "—"
 
-        if not request_id:
-            logging.warning("Slack row missing RequestID for lead=%s vehicle=%s", lead, veh)
+        # 1) Get a request id; fallback by name+vehicle if missing
+        req_id = r.get("RequestID") or r.get("request_id")
+        if not req_id:
+            req_id = _lookup_request_id_by_name_vehicle(lead, veh)
+            if not req_id:
+                logging.warning("Slack row missing RequestID for lead=%s vehicle=%s", lead, veh)
+
+        # 2) Encode as "op|req" so _extract_op_and_req_id_from_action can parse reliably
+        view_val = f"view_summary|{req_id}" if req_id else "view_summary|"
+        call_val = f"mark_called|{req_id}"  if req_id else "mark_called|"
+        note_val = f"update_sales_notes|{req_id}" if req_id else "update_sales_notes|"
 
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn",
-                     "text": f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{lead}* — {veh}  | *Score:* {score}  | *Status:* {status}\n• {reason}"
+            },
             "accessory": {
                 "type": "overflow",
-                "action_id": "lead_actions",
                 "options": [
-                    {"text": {"type": "plain_text", "text": "View summary"},
-                     "value": f"view_summary|{request_id}"},
-                    {"text": {"type": "plain_text", "text": "Mark called"},
-                     "value": f"mark_called|{request_id}"},
-                    {"text": {"type": "plain_text", "text": "Update sales notes"},
-                     "value": f"update_sales_notes|{request_id}"},
+                    {"text": {"type": "plain_text", "text": "View summary"},       "value": view_val},
+                    {"text": {"type": "plain_text", "text": "Mark called"},        "value": call_val},
+                    {"text": {"type": "plain_text", "text": "Update sales notes"}, "value": note_val},
                 ],
+                "action_id": "lead_actions",
             },
         })
-        blocks.append({"type": "divider"})
+
     return blocks
 # ---- Block Kit builders ----
 def _list_item_blocks(item: dict) -> list:
@@ -865,8 +930,9 @@ def _list_item_blocks(item: dict) -> list:
 
 def _summary_modal_blocks(lead: dict, email_summary: str | None, wa_summary: str | None) -> dict:
     lead_title = f"{lead.get('full_name','Lead')} — {lead.get('vehicle','')}".strip(" —")
-    email_text = email_summary if (email_summary and email_summary.strip()) else "_No recent email summary_"
-    wa_text    = wa_summary if (wa_summary and wa_summary.strip()) else "_No recent WhatsApp summary_"
+
+    email_text = _briefify(email_summary) if (email_summary and email_summary.strip()) else "_No recent email summary_"
+    wa_text    = _briefify(wa_summary)    if (wa_summary and wa_summary.strip())    else "_No recent WhatsApp summary_"
 
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{lead_title}*"}},
