@@ -671,19 +671,6 @@ def _log_short(label: str, obj) -> None:
     logging.info("%s: %s", label, s)
 
 # Put near other Slack helpers
-def _reply_ephemeral(response_url: str | None, channel_id: str | None, user_id: str | None, body: dict | str):
-    """Prefer response_url; fallback to chat_postEphemeral."""
-    if isinstance(body, str):
-        body = {"response_type": "ephemeral", "text": body}
-    if response_url:
-        _post_to_response_url(response_url, body)
-        return
-    if slack_client and channel_id and user_id:
-        try:
-            slack_client.chat_postEphemeral(channel=channel_id, user=user_id, text=body.get("text") or "Done.")
-        except Exception as e:
-            logging.warning("chat_postEphemeral fallback failed: %s", e)
-
 def _refresh_who_to_call_message(response_url: str | None):
     """Recompute the list and replace the original message so the UI updates."""
     if not response_url:
@@ -951,18 +938,56 @@ def _format_call_list_blocks(analytics_json: dict) -> list[dict]:
 
 # ===== Slack Summary UX: open fast, fill later =====
 
-def _summary_modal_placeholder(request_id: str) -> dict:
-    """Quick modal to beat Slack’s ~3s trigger timeout."""
+def _reply_ephemeral(response_url: str | None, channel_id: str | None, user_id: str | None, text: str):
+    """Prefer response_url; fall back to chat.postEphemeral."""
+    try:
+        if response_url:
+            _post_to_response_url(response_url, {"response_type": "ephemeral", "text": text})
+        elif slack_client and channel_id and user_id:
+            slack_client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
+    except Exception as e:
+        logging.warning("ephemeral reply failed: %s", e)
+
+def _summary_modal_placeholder(lead: dict) -> dict:
+    title = f"{lead.get('full_name','Lead')} — {lead.get('vehicle','')}".strip(" —")
     return {
         "type": "modal",
         "callback_id": "summary_modal",
-        "private_metadata": json.dumps({"request_id": request_id}),
         "title": {"type": "plain_text", "text": "Lead Summary"},
         "close": {"type": "plain_text", "text": "Close"},
         "blocks": [
-            {"type": "section",
-             "text": {"type": "mrkdwn", "text": "*Loading summary…*"}}],
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "_Working on the latest engagement summary…_"}}
+        ],
     }
+
+def _build_final_summary_view(lead: dict, email_summary: str | None, wa_summary: str | None) -> dict:
+    email_text = email_summary.strip() if (email_summary and email_summary.strip()) else "_No recent email summary_"
+    wa_text    = wa_summary.strip()    if (wa_summary and wa_summary.strip())    else "_No recent WhatsApp summary_"
+    title = f"{lead.get('full_name','Lead')} — {lead.get('vehicle','')}".strip(" —")
+    return {
+        "type": "modal",
+        "callback_id": "summary_modal",
+        "title": {"type": "plain_text", "text": "Lead Summary"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Email summary*\n{email_text}"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*WhatsApp summary*\n{wa_text}"}},
+        ],
+    }
+
+def _async_fill_summary_and_update_modal(view_id: str, request_id: str):
+    """Runs outside the 3s Slack window; fetches + (optionally) LLM-summarizes, then views_update."""
+    try:
+        lead = _get_lead_core(request_id)
+        email_summary = _get_email_insight(request_id)
+        wa_summary    = _get_wa_summary(request_id)
+        final_view    = _build_final_summary_view(lead, email_summary, wa_summary)
+        if slack_client and view_id:
+            slack_client.views_update(view_id=view_id, view=final_view)
+    except Exception as e:
+        logging.warning("async summary update failed: %s", e)
 
 def _summarize_with_llm(txt: str, kind: str) -> str:
     """
@@ -1002,25 +1027,6 @@ def _summarize_with_llm(txt: str, kind: str) -> str:
         logging.warning("LLM summarize failed (%s): %s", kind, e)
         return txt
 
-def _async_fill_summary_and_update_modal(view_id: str, request_id: str):
-    """Runs after the modal is opened, then updates it with final content."""
-    lead = _get_lead_core(request_id)
-    email_summary = _get_email_insight(request_id)
-    wa_summary    = _get_wa_summary(request_id)
-
-    # Optional LLM shortening (nice for long WA logs)
-    if email_summary:
-        email_summary = _summarize_with_llm(email_summary, "email")
-    if wa_summary:
-        wa_summary    = _summarize_with_llm(wa_summary, "whatsapp")
-
-    view = _summary_modal_blocks(lead, email_summary, wa_summary)
-
-    try:
-        if slack_client and view_id:
-            slack_client.views_update(view_id=view_id, view=view)
-    except Exception as e:
-        logging.warning("views_update failed: %s", getattr(e, "response", e))
 
 # ---- Block Kit builders ----
 def _list_item_blocks(item: dict) -> list:
@@ -2031,17 +2037,16 @@ def _handle_slash_async_job(cmd: str, text: str, response_url: str, channel_id: 
         })
 
 @app.post("/slack/interactivity")
-async def slack_interactivity(request: Request):
+async def slack_interactivity(request: Request, background_tasks: BackgroundTasks):
     raw = await request.body()
     _verify_slack(request, raw)
 
     form = await request.form()
     payload = json.loads(form.get("payload") or "{}")
     ptype = payload.get("type")
-
     logging.info('SLACK interactivity type: "%s"', ptype)
 
-    # ----- Button / overflow actions -----
+    # ---------- Button / overflow actions ----------
     if ptype == "block_actions":
         op, request_id, action_id, raw_val = _extract_op_and_req_id_from_action(payload)
         trigger_id   = payload.get("trigger_id")
@@ -2052,59 +2057,81 @@ async def slack_interactivity(request: Request):
         logging.info('SLACK action payload: {"action_id": "%s", "op": "%s", "raw": "%s", "req_id": "%s"}',
                      action_id, op, raw_val, request_id)
 
-        # 1) View summary (already working)
+        # (1) VIEW SUMMARY — open placeholder immediately, then async update
         if op == "view_summary":
             if not request_id:
                 _reply_ephemeral(response_url, channel_id, user_id, "⚠️ Missing request_id.")
                 return JSONResponse({})
-            lead = _get_lead_core(request_id)
-            email_summary = _get_email_insight(request_id)
-            wa_summary    = _get_wa_summary(request_id)
-            view = _summary_modal_blocks(lead, email_summary, wa_summary)
-            if slack_client and trigger_id:
-                try:
-                    slack_client.views_open(trigger_id=trigger_id, view=view)
-                except Exception as e:
-                    logging.warning("views_open failed: %s", e)
-                    _reply_ephemeral(response_url, channel_id, user_id, "Couldn’t open summary.")
+            try:
+                lead = _get_lead_core(request_id)
+                # open ASAP to avoid expired_trigger_id
+                open_res = slack_client.views_open(trigger_id=trigger_id, view=_summary_modal_placeholder(lead))
+                view_id  = (open_res.get("view") or {}).get("id")
+                if view_id:
+                    background_tasks.add_task(_async_fill_summary_and_update_modal, view_id, request_id)
+            except Exception as e:
+                logging.warning("views_open failed: %s", e)
+                _reply_ephemeral(response_url, channel_id, user_id, "Couldn’t open summary.")
             return JSONResponse({})
 
-        # 2) Mark called
+        # (2) MARK CALLED — update DB, ACK only (do NOT replace original list)
         if op == "mark_called":
             if not request_id:
                 _reply_ephemeral(response_url, channel_id, user_id, "⚠️ Missing request_id; can’t mark called.")
                 return JSONResponse({})
-            ok, who = _mark_called(request_id)
-            _reply_ephemeral(response_url, channel_id, user_id,
-                             "✅ Marked as called." if ok else "⚠️ Could not mark as called.")
-            _refresh_who_to_call_message(response_url)  # refresh the list UI
+            try:
+                who = _mark_called(request_id)  # your helper returns name or request_id
+                _reply_ephemeral(response_url, channel_id, user_id, f"✅ Marked called: {who or request_id}")
+            except Exception as e:
+                logging.warning("mark_called failed: %s", e)
+                _reply_ephemeral(response_url, channel_id, user_id, "⚠️ Could not mark as called.")
             return JSONResponse({})
 
-        # 3) Update sales notes (open modal)
+        # (3) UPDATE SALES NOTES — open modal; submit handled below
         if op == "update_sales_notes":
             if not request_id:
                 _reply_ephemeral(response_url, channel_id, user_id, "⚠️ Missing request_id; can’t update notes.")
-            else:
+                return JSONResponse({})
+            try:
                 lead = _get_lead_core(request_id)
-                view = _update_notes_modal(
-                    request_id,
-                    lead.get("sales_notes") or "",
-                    response_url, channel_id, user_id  # so submit handler can refresh + ack
-                )
-                if slack_client and trigger_id:
-                    try:
-                        slack_client.views_open(trigger_id=trigger_id, view=view)
-                    except Exception as e:
-                        logging.warning("views_open failed: %s", e)
-                        _reply_ephemeral(response_url, channel_id, user_id, "Couldn’t open notes modal.")
+                view = {
+                    "type": "modal",
+                    "callback_id": "update_notes_submit",
+                    "private_metadata": json.dumps({
+                        "request_id": request_id,
+                        "response_url": response_url,
+                        "channel_id": channel_id,
+                        "user_id": user_id,
+                    }),
+                    "title": {"type": "plain_text", "text": "Update Sales Notes"},
+                    "submit": {"type": "plain_text", "text": "Save"},
+                    "close": {"type": "plain_text", "text": "Cancel"},
+                    "blocks": [
+                        {
+                            "type": "input",
+                            "block_id": "notes_b",
+                            "element": {
+                                "type": "plain_text_input",
+                                "action_id": "notes_a",
+                                "multiline": True,
+                                "initial_value": (lead.get("sales_notes") or ""),
+                            },
+                            "label": {"type": "plain_text", "text": "Sales notes"},
+                        }
+                    ],
+                }
+                slack_client.views_open(trigger_id=trigger_id, view=view)
+            except Exception as e:
+                logging.warning("open notes modal failed: %s", e)
+                _reply_ephemeral(response_url, channel_id, user_id, "Couldn’t open notes modal.")
             return JSONResponse({})
 
-        # Fallback for unexpected actions
+        # Fallback
         _reply_ephemeral(response_url, channel_id, user_id,
                          f"Unsupported action (action_id={action_id}, value={raw_val}, op={op}).")
         return JSONResponse({})
 
-    # ----- Modal submission (Update notes) -----
+    # ---------- Modal submission ----------
     if ptype == "view_submission":
         view = payload.get("view") or {}
         if view.get("callback_id") == "update_notes_submit":
@@ -2113,18 +2140,21 @@ async def slack_interactivity(request: Request):
             resp_u = meta.get("response_url")
             chan   = meta.get("channel_id")
             usr    = meta.get("user_id")
-
             vals   = view.get("state", {}).get("values", {})
             notes  = vals.get("notes_b", {}).get("notes_a", {}).get("value", "")
-            ok = _update_sales_notes(req_id, notes) if req_id else False
 
-            _reply_ephemeral(resp_u, chan, usr, "✅ Notes saved." if ok else "⚠️ Couldn’t save notes.")
-            _refresh_who_to_call_message(resp_u)  # refresh the list UI
+            ok = False
+            try:
+                if req_id:
+                    _update_sales_notes(req_id, notes)
+                    ok = True
+            finally:
+                # ACK user; do NOT replace the slash message
+                _reply_ephemeral(resp_u, chan, usr, "✅ Notes saved." if ok else "⚠️ Couldn’t save notes.")
 
             return JSONResponse({"response_action": "clear"})
 
     return PlainTextResponse("", status_code=200)
-
 
 # --- ENDPOINTS FOR LEAD INSIGHTS (Future extension if needed from agent service) ---
 # For now, Lead Insights remains an indicator in dashboard.py, but this service could
