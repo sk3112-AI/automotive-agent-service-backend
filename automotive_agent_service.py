@@ -16,6 +16,7 @@ from supabase import create_client, Client
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional, List
 import json
+import re
 import logging
 import sys
 import string  # ✅ NEW
@@ -90,6 +91,82 @@ AOE_VEHICLE_IMAGES = {
     "AOE Volt": "https://storage.googleapis.com/aoe-motors-images/AOE%20Volt.jpg"
 }
 
+# 1. EXPANDED BUNDLE CATALOG (The "Menu")
+# Includes realistic Warranty, Service, and Protection products.
+BUNDLE_CATALOG = {
+    "AOE Apex": [
+        {
+            "id": "executive_shield",
+            "title": "Executive Shield Package",
+            "price": 2800,
+            "items": [
+                "5-Year/60k Mile Extended Warranty",
+                "Tire & Wheel Protection (Cosmetic)",
+                "Paintless Dent Repair"
+            ],
+            "marketing_tag": "Protect your investment"
+        },
+        {
+            "id": "ownership_plus",
+            "title": "Ownership Plus",
+            "price": 3500,
+            "items": [
+                "7-Year/100k Mile Powertrain Warranty",
+                "4-Year Prepaid Scheduled Maintenance",
+                "24/7 Premium Roadside Assistance"
+            ],
+            "marketing_tag": "Worry-free driving"
+        }
+    ],
+    "AOE Thunder": [
+        {
+            "id": "adventure_ready",
+            "title": "Adventure Ready Bundle",
+            "price": 2200,
+            "items": [
+                "All-Weather Floor Liners",
+                "Roof Rack Crossbars",
+                "Unlimited Roadside Recovery (Off-road)"
+            ],
+            "marketing_tag": "For the trails"
+        },
+        {
+            "id": "performance_care",
+            "title": "Performance Care",
+            "price": 3100,
+            "items": [
+                "Brake Pad & Rotor Replacement Coverage",
+                "High-Performance Tire Protection",
+                "5-Year Bumper-to-Bumper Extension"
+            ],
+            "marketing_tag": "Drive it hard, we got you"
+        }
+    ],
+    "AOE Volt": [
+        {
+            "id": "electrified_life",
+            "title": "Electrified Life Pack",
+            "price": 1800,
+            "items": [
+                "Home Wallbox Charger (Hardware + Install Credit)",
+                "8-Year Battery Health Certificate",
+                "$500 Public Charging Credit"
+            ],
+            "marketing_tag": "Seamless EV transition"
+        },
+        {
+            "id": "urban_armor",
+            "title": "Urban Armor",
+            "price": 1200,
+            "items": [
+                "Glass & Windshield Protection",
+                "Key Fob Replacement Insurance",
+                "City-limit Roadside Assistance"
+            ],
+            "marketing_tag": "City proofing"
+        }
+    ]
+}
 
 # --- GLOBAL CONFIGURATIONS FOR ANALYTICS AND AUTOMATION SERVICE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -1195,6 +1272,24 @@ def _norm_status(s: str) -> str:
     s = s.replace("the ", "")  # "Call the customer (AI)" -> "call customer (ai)"
     return s
 
+def extract_price_from_text(text):
+    """
+    Parses 'Starting at $65,000' or '$65k' into float 65000.0
+    """
+    if not text: return 60000.0 # Default fallback
+    
+    # Normalize: Remove currency symbols, commas
+    clean = re.sub(r'[^\d.]', '', text)
+    
+    try:
+        val = float(clean)
+        # Sanity check: If it's too small (e.g. 65.0), assume 'k' notation wasn't there but implied
+        if val < 1000: 
+            return 60000.0
+        return val
+    except:
+        return 60000.0
+
 # ---- Helper: score sales notes when Follow Up Required
 def _score_from_sales_notes(notes: str) -> tuple[int, list[str]]:
     """
@@ -2149,6 +2244,122 @@ async def slack_interactivity(request: Request, background_tasks: BackgroundTask
             return JSONResponse({"response_action": "clear"})
 
     return PlainTextResponse("", status_code=200)
+
+# 3. ENDPOINT: Generate Personalized Offer
+class OfferRequest(BaseModel):
+    request_id: str
+    vehicle_name: str
+    sales_notes: str
+    lead_score: int
+
+@app.post("/generate-offer")
+async def api_generate_offer(req: OfferRequest):
+    """
+    Agentic Endpoint:
+    1. Determines Interest Rate (APR) based on Lead Score.
+    2. Selects the perfect Bundle (Warranty/Service) based on Sales Notes.
+    3. Updates Supabase to trigger Microsite 'Personalized Offer' view.
+    """
+    logging.info(f"Generating offer for {req.request_id} ({req.vehicle_name})")
+
+    # A. Fetch Base Price (MSRP)
+    # Try to get real price from KB, otherwise fall back to realistic defaults
+    try:
+        kb_res = supabase.from_("faq_kb").select("pricing_blurb").eq("model_key", req.vehicle_name).limit(1).execute()
+        pricing_text = kb_res.data[0]['pricing_blurb'] if kb_res.data else ""
+        msrp = extract_price_from_text(pricing_text)
+    except Exception as e:
+        logging.warning(f"Pricing fetch failed: {e}")
+        msrp = 65000.0
+
+    # B. Determine APR & Incentives (Rule-Based Logic)
+    # Hot leads get "Closing" rates; Cold leads get "Standard" rates
+    if req.lead_score >= 10:
+        apr = 1.9
+        discount = 2500
+        label = "Winter Event - Tier 1 Exclusive"
+    elif req.lead_score >= 5:
+        apr = 3.9
+        discount = 1000
+        label = "Preferred Customer Bonus"
+    else:
+        apr = 5.9
+        discount = 500
+        label = "Standard Incentive"
+
+    # C. AI Bundle Selection (The "Agent" Logic)
+    available_bundles = BUNDLE_CATALOG.get(req.vehicle_name, BUNDLE_CATALOG["AOE Apex"])
+    
+    # We send the specific bundle options to the LLM so it can't hallucinate products
+    prompt = f"""
+    You are an expert Automotive Finance Manager.
+    
+    Customer Profile:
+    - Interested Vehicle: {req.vehicle_name}
+    - Sales Notes/Concerns: "{req.sales_notes}"
+    
+    Available Bundles (Menu):
+    {json.dumps(available_bundles, indent=2)}
+    
+    Task:
+    1. Analyze the customer's notes. (Look for keywords like 'maintenance', 'safety', 'range', 'off-road', 'cost').
+    2. Select the ONE bundle from the menu that adds the most value to this specific customer.
+    3. If notes are empty or generic, pick the highest value bundle (usually warranty/service).
+    4. Write a "Why" sentence explaining the choice to the customer.
+    
+    Output JSON ONLY: {{ "selected_id": "...", "ai_reason": "..." }}
+    """
+
+    try:
+        ai_resp = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2 # Low temperature for consistent selection
+        )
+        decision = json.loads(ai_resp.choices[0].message.content)
+        
+        # Match ID back to full object
+        selected_bundle = next((b for b in available_bundles if b["id"] == decision.get("selected_id")), available_bundles[0])
+        # Inject the AI's personalized reason into the object
+        selected_bundle["reason"] = decision.get("ai_reason", "Recommended based on your vehicle choice.")
+        
+    except Exception as e:
+        logging.error(f"LLM Bundle selection failed: {e}")
+        # Fallback
+        selected_bundle = available_bundles[0]
+        selected_bundle["reason"] = "Our most popular protection package."
+
+    # D. Construct the Final Deal JSON
+    offer_data = {
+        "msrp": msrp,
+        "discount": discount,
+        "incentive_label": label,
+        "financing": {
+            "apr": apr,
+            "term": 60,
+            "min_down_payment": 5000
+        },
+        # Accessories are separate from the fixed bundle
+        "accessories_range": {
+            "min": 0,
+            "max": 5000,
+            "default": 0
+        },
+        "recommended_bundle": selected_bundle
+    }
+
+    # E. Update Supabase (Triggering the Microsite Change)
+    try:
+        supabase.from_(SUPABASE_TABLE_NAME).update({
+            "offer_details": offer_data,
+            "action_status": "Personal Offer" 
+        }).eq("request_id", req.request_id).execute()
+        
+        return {"status": "success", "offer": offer_data}
+        
+    except Exception as e:
+        logging.error(f"Database update failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- ENDPOINTS FOR LEAD INSIGHTS (Future extension if needed from agent service) ---
 # For now, Lead Insights remains an indicator in dashboard.py, but this service could
